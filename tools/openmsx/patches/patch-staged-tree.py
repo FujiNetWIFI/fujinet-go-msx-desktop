@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Two patches:
+Three patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -24,6 +24,23 @@ Two patches:
    and XRGB8888 packing happens on our side, using the same
    FrameSource::getLinePtr*() API PostProcessor's own getScaledFrame()
    helper already uses -- nothing here duplicates that logic.
+
+3. src/Reactor.cc: a debug-pump hook at the top of Reactor::run()'s loop
+   (M6, the debugger). Confirmed by reading the loop before writing this:
+   `eventDistributor->deliverEvents()` runs on *every* iteration whether
+   the CPU is executing or blocked (MSXCPUInterface::doBreak() -- which
+   the Tcl "debug break" command calls -- increments blockedCounter, and a
+   blocked iteration just sleeps 20ms and loops back around instead of
+   calling into the CPU). msx_host.cc's command queue (msxhost_
+   switch_machine et al, and now the debugger's synchronous Tcl-command
+   RPC) was, until this patch, only drained from the frame hook above --
+   which stops firing the instant the CPU is broken, since no more frames
+   render. Without this hook every debugger control (resume, step, read a
+   register) would hang forever the moment a breakpoint was hit. Calling
+   the same drain functions here too, unconditionally, guarantees they run
+   at least once every ~20ms regardless of run/broken state; the frame
+   hook still covers the (much higher-frequency) normal-running case
+   unchanged.
 
 Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
@@ -118,12 +135,60 @@ def patch_frame_hook(stage_dir: str) -> None:
     print(f"Patched {path}: msxhost_notify_frame() hook in rotateFrames()")
 
 
+def patch_debug_pump_hook(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/Reactor.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "msxhost_debug_pump"
+    if marker in text:
+        return  # already patched
+
+    decl_anchor = "namespace openmsx {\n"
+    decl = (
+        "namespace openmsx {\n\n"
+        "// FujiNet Go MSX (desktop) debugger command-queue pump -- see\n"
+        "// tools/openmsx/patches/patch-staged-tree.py and\n"
+        "// core/openmsx/msx_host.cc. Called at the top of every\n"
+        "// Reactor::run() loop iteration, whether the CPU is executing or\n"
+        "// blocked (a debugger break), so msx_host.cc's cross-thread\n"
+        "// command queue keeps draining even while broken -- the frame\n"
+        "// hook in PostProcessor.cc alone cannot, since no more frames\n"
+        "// render once the CPU stops.\n"
+        'extern "C" void msxhost_debug_pump(void);\n')
+    if decl_anchor not in text:
+        fail(f"{path}: 'namespace openmsx {{' anchor not found for the "
+             "debug-pump forward declaration")
+    text = text.replace(decl_anchor, decl, 1)
+
+    call_anchor = (
+        "void Reactor::run()\n"
+        "{\n"
+        "\twhile (running) {\n"
+        "\t\teventDistributor->deliverEvents();\n")
+    call = (
+        "void Reactor::run()\n"
+        "{\n"
+        "\twhile (running) {\n"
+        "\t\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+        "\t\tmsxhost_debug_pump();\n"
+        "\t\teventDistributor->deliverEvents();\n")
+    if call_anchor not in text:
+        fail(f"{path}: Reactor::run() loop anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(call_anchor, call, 1)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: msxhost_debug_pump() hook in Reactor::run()")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
     stage_dir = sys.argv[1]
     patch_fujinet_port(stage_dir)
     patch_frame_hook(stage_dir)
+    patch_debug_pump_hook(stage_dir)
 
 
 if __name__ == "__main__":

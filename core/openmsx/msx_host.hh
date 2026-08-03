@@ -109,6 +109,57 @@ void msxhost_set_joystick_button(int port, int id, int pressed);
  * msxhost_core_start is the path for that case instead). */
 void msxhost_switch_machine(const char* machine_id);
 
+/* --- synchronous Tcl command RPC (M6, the debugger) -----------------------
+ * Executes an arbitrary openMSX Tcl command ON the openMSX thread (queued
+ * and drained the same way as msxhost_switch_machine, but this call BLOCKS
+ * the caller until the command has actually run and returns its result),
+ * safe from any thread. This is the one primitive core/debugger/debugger.c
+ * is built entirely on top of: pause/step/continue ("debug break"/"step"/
+ * "cont" -- themselves calling MSXCPUInterface::doBreak/doStep/doContinue,
+ * which per CPUCore.cc's own comment "may only get called by the main
+ * emulation thread", exactly why this has to be queued rather than called
+ * directly), breakpoints ("debug set_bp"/"remove_bp"/"list_bp", including
+ * *conditional* one-shot breakpoints for step-over/step-out -- openMSX has
+ * no native step-over, so a one-shot breakpoint at the return address with
+ * an SP-floor condition does the same job adamdebug.c's own exec-hook does
+ * on the ADAM target), registers (the "reg"/"cpuregs" Tcl procs already in
+ * share/scripts/_cpuregs.tcl, which this app already bundles), and memory/
+ * VDP snapshot reads ("debug read_block <debuggable> ...").
+ *
+ * result_out receives the Tcl result (or, on a Tcl exception, the error
+ * message) as a NUL-terminated string, truncated to fit; pass NULL/0 if the
+ * caller does not need it (e.g. "debug break", "cont"). Returns 1 if the
+ * command executed without a Tcl exception, 0 on a Tcl exception AND on
+ * timeout (openMSX is not running, or the debug-pump hook -- see
+ * patch-staged-tree.py -- somehow isn't draining; bounded so a wedged
+ * command can never hang the caller forever).
+ *
+ * Only one call may be in flight at a time; concurrent callers block on
+ * each other (debugger.c already serializes through its own engine mutex,
+ * so this is a backstop, not the primary serialization). */
+int msxhost_execute_sync(const char* command, char* result_out, int result_max);
+
+/* Binary-safe variant for commands whose result is a Tcl bytearray -- in
+ * particular "debug read_block <debuggable> <offset> <size>", the VDP/CPU-
+ * regs/memory snapshot primitive the VDP debugger and register view are
+ * built on. Do NOT fetch such a result through msxhost_execute_sync(): a
+ * Tcl bytearray's *string* representation (what getString()/%s produce) is
+ * a UTF-8-ish reencoding where byte values above 0x7F expand to multi-byte
+ * sequences and 0x00 truncates the C string outright -- exactly the byte
+ * range VDP registers, palette entries and VRAM contents live in. This
+ * reads the Tcl_Obj's byte-array representation directly instead, so every
+ * byte 0x00-0xFF survives intact.
+ *
+ * Copies min(<actual result length>, result_max) bytes into result_out and
+ * writes the true length to *result_len_out (which may exceed result_max
+ * if the buffer was too small, same convention as snprintf; pass NULL if
+ * not needed). Returns 1 on success, 0 on a Tcl exception or timeout
+ * (*result_len_out set to 0, result_out untouched -- there is no error
+ * message on this path; use msxhost_execute_sync for commands where a
+ * human-readable failure reason matters). */
+int msxhost_execute_sync_binary(const char* command, uint8_t* result_out,
+                                int result_max, int* result_len_out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

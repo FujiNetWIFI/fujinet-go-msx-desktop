@@ -106,3 +106,15 @@ add_executable(machine_switch_test tests/machine_switch_test.c)
 target_link_libraries(machine_switch_test PRIVATE msxsession)
 add_test(NAME machine_switch_test COMMAND machine_switch_test)
 set_tests_properties(machine_switch_test PROPERTIES TIMEOUT 60)
+
+# M6 gate: exercises msxhost_execute_sync() directly -- the one primitive
+# the whole debugger engine is built on top of -- including the case that
+# motivated the third staged-source patch (patch_debug_pump_hook): a
+# command issued while the CPU is broken. Needs core/openmsx on its
+# include path for msx_host.hh (msxsession's public contract is
+# msxsession.h only; this test reaches one level deeper on purpose).
+add_executable(rpc_test tests/rpc_test.c)
+target_link_libraries(rpc_test PRIVATE msxsession)
+target_include_directories(rpc_test PRIVATE "${CMAKE_SOURCE_DIR}/core/openmsx")
+add_test(NAME rpc_test COMMAND rpc_test)
+set_tests_properties(rpc_test PROPERTIES TIMEOUT 60)

@@ -19,6 +19,7 @@
 #include "MSXException.hh"
 #include "Reactor.hh"
 #include "RenderSettings.hh"
+#include "TclObject.hh"
 #include "Thread.hh"
 
 #include <SDL.h>
@@ -80,6 +81,22 @@ std::vector<openmsx::Event> g_event_queue;
 std::mutex g_command_mutex;
 std::vector<std::string> g_command_queue;
 
+// Synchronous Tcl RPC (M6, the debugger) -- see msxhost_execute_sync(). One
+// request in flight at a time: msxhost_execute_sync() holds g_rpc_mutex for
+// its entire duration (request setup through result collection), so this is
+// simpler than the fire-and-forget queues above -- no vector, just one slot.
+std::mutex g_rpc_mutex;
+std::condition_variable g_rpc_cv;
+struct {
+    bool pending = false;
+    bool done = false;
+    bool binary = false;      // false: g_rpc.result (text); true: g_rpc.binary_result
+    std::string command;
+    std::string result;
+    std::vector<uint8_t> binary_result;
+    bool ok = false;
+} g_rpc;
+
 void set_error(const std::string& msg) {
     std::fprintf(stderr, "msx_host: %s\n", msg.c_str());
     g_last_error = msg;
@@ -123,6 +140,69 @@ void drain_pending_commands() {
             std::fprintf(stderr, "msx_host: command \"%s\" failed\n", cmd.c_str());
         }
     }
+}
+
+// Services one pending msxhost_execute_sync() request, if any. Unlike the
+// fire-and-forget queues above, the caller is blocked waiting on g_rpc_cv,
+// so this must always set done=true and notify before returning -- even on
+// the "openMSX isn't up" path -- or the caller would hang until its own
+// timeout.
+void service_pending_rpc() {
+    std::string command;
+    bool binary;
+    {
+        std::lock_guard<std::mutex> lk(g_rpc_mutex);
+        if (!g_rpc.pending || g_rpc.done) return;
+        command = g_rpc.command;
+        binary = g_rpc.binary;
+    }
+    std::string result;
+    std::vector<uint8_t> binary_result;
+    bool ok = false;
+    if (g_reactor) {
+        try {
+            openmsx::TclObject tclResult =
+                g_reactor->getCommandController().executeCommand(command);
+            if (binary) {
+                // getBinary() reads the Tcl_Obj's byte-array representation
+                // directly (Tcl_GetByteArrayFromObj under the hood), unlike
+                // getString(): a bytearray's *string* representation forces
+                // a UTF-8-ish reencoding where byte values > 0x7F expand to
+                // multi-byte sequences ("shimmering"), which would corrupt
+                // exactly the VDP/memory data this path exists to fetch.
+                auto bin = tclResult.getBinary();
+                binary_result.assign(bin.begin(), bin.end());
+            } else {
+                result = std::string(tclResult.getString());
+            }
+            ok = true;
+        } catch (openmsx::MSXException& e) {
+            result = std::string(e.getMessage());
+            ok = false;
+        } catch (std::exception& e) {
+            result = e.what();
+            ok = false;
+        }
+    } else {
+        result = "openMSX is not running";
+        ok = false;
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_rpc_mutex);
+        g_rpc.result = std::move(result);
+        g_rpc.binary_result = std::move(binary_result);
+        g_rpc.ok = ok;
+        g_rpc.done = true;
+    }
+    g_rpc_cv.notify_all();
+}
+
+// Called from both hook points (the per-frame hook and the debug-pump hook
+// that keeps running while the CPU is broken -- see msxhost_debug_pump()).
+void drain_all() {
+    drain_pending_events();
+    drain_pending_commands();
+    service_pending_rpc();
 }
 
 void openmsx_thread_main() {
@@ -236,6 +316,17 @@ void openmsx_thread_main() {
         std::lock_guard<std::mutex> lk(g_event_mutex);
         g_event_queue.clear();
     }
+    {   // Wake a pending msxhost_execute_sync() caller immediately (openMSX
+        // exiting IS the answer -- "not running") rather than leaving it to
+        // discover that only after its own 5s timeout.
+        std::lock_guard<std::mutex> lk(g_rpc_mutex);
+        if (g_rpc.pending && !g_rpc.done) {
+            g_rpc.result = "openMSX is no longer running";
+            g_rpc.ok = false;
+            g_rpc.done = true;
+        }
+    }
+    g_rpc_cv.notify_all();
     if (cleanRun && reactor) {
         delete reactor; // tears down SDL video for a fresh restart
     }
@@ -257,8 +348,7 @@ namespace { inline void msx_thread_setname_shim() { msx_thread_setname_shim_impl
 // the openMSX thread. Packs the CPU-side FrameSource into the fixed
 // 640x480 XRGB8888 buffer the frame sink expects -- no GL readback.
 extern "C" void msxhost_notify_frame(const openmsx::FrameSource* frame) {
-    drain_pending_events();
-    drain_pending_commands();
+    drain_all();
     if (!g_frame_sink || !frame) return;
 
     static thread_local std::vector<uint32_t> capture(
@@ -281,6 +371,16 @@ extern "C" void msxhost_notify_frame(const openmsx::FrameSource* frame) {
         }
     }
     g_frame_sink(capture.data(), kFrameW, kFrameH, g_frame_user);
+}
+
+// Called from the patched openmsx::Reactor::run() (see
+// tools/openmsx/patches/patch-staged-tree.py) at the top of every loop
+// iteration, whether the CPU is executing or blocked. This is what keeps
+// the command queue and the debugger's synchronous RPC draining reliably
+// once a breakpoint stops the CPU -- msxhost_notify_frame() above stops
+// firing entirely at that point, since no more VDP frames render.
+extern "C" void msxhost_debug_pump(void) {
+    drain_all();
 }
 
 // --- C API ----------------------------------------------------------------
@@ -438,6 +538,68 @@ void msxhost_switch_machine(const char* machine_id) {
     // does not carry over the previous board's extensions -- re-insert
     // FujiNet the same way the initial boot does.
     g_command_queue.emplace_back("ext FujiNet");
+}
+
+int msxhost_execute_sync(const char* command, char* result_out, int result_max) {
+    if (!command) return 0;
+    // Holds g_rpc_mutex for the whole call, so concurrent callers serialize
+    // here rather than racing the single request slot.
+    std::unique_lock<std::mutex> lk(g_rpc_mutex);
+    g_rpc.pending = true;
+    g_rpc.done = false;
+    g_rpc.binary = false;
+    g_rpc.command = command;
+
+    // Bounded: openMSX not running, or a wedged debug-pump hook, must not
+    // hang the caller forever. 5s is generous for a Tcl command -- even a
+    // read_block over the largest VRAM debuggable is microseconds of actual
+    // work once service_pending_rpc() runs; the wait is for the *pump*
+    // cadence (up to ~20ms while broken), not the command itself.
+    bool got = g_rpc_cv.wait_for(lk, std::chrono::seconds(5),
+                                 [] { return g_rpc.done; });
+
+    int ok = 0;
+    if (got) {
+        ok = g_rpc.ok ? 1 : 0;
+        if (result_out && result_max > 0) {
+            std::snprintf(result_out, static_cast<size_t>(result_max), "%s",
+                          g_rpc.result.c_str());
+        }
+    } else if (result_out && result_max > 0) {
+        std::snprintf(result_out, static_cast<size_t>(result_max), "%s",
+                      "msxhost_execute_sync: timed out");
+    }
+    g_rpc.pending = false;
+    return ok;
+}
+
+int msxhost_execute_sync_binary(const char* command, uint8_t* result_out,
+                                int result_max, int* result_len_out) {
+    if (result_len_out) *result_len_out = 0;
+    if (!command) return 0;
+    std::unique_lock<std::mutex> lk(g_rpc_mutex);
+    g_rpc.pending = true;
+    g_rpc.done = false;
+    g_rpc.binary = true;
+    g_rpc.command = command;
+
+    bool got = g_rpc_cv.wait_for(lk, std::chrono::seconds(5),
+                                 [] { return g_rpc.done; });
+
+    int ok = 0;
+    if (got) {
+        ok = g_rpc.ok ? 1 : 0;
+        if (ok) {
+            if (result_len_out) *result_len_out = static_cast<int>(g_rpc.binary_result.size());
+            if (result_out && result_max > 0) {
+                size_t n = g_rpc.binary_result.size();
+                if (n > static_cast<size_t>(result_max)) n = static_cast<size_t>(result_max);
+                std::memcpy(result_out, g_rpc.binary_result.data(), n);
+            }
+        }
+    }
+    g_rpc.pending = false;
+    return ok;
 }
 
 }  // extern "C"

@@ -404,27 +404,87 @@ Done (this pass) -- M5
   with no *_SRC overrides.
 
 
-Next -- M6
-----------
+In progress -- M6
+-----------------
 
 Debugger engine + the V9938/V9958 VDP debugger + the GNOME debugger
-window. The largest single milestone left; read this in full before
-starting.
+window. The largest single milestone; read this in full before
+continuing.
 
-z80dasm.{c,h} ported verbatim from adam-desktop (same CPU, already
-tested). Pause/step/continue call MSXCPUInterface::doBreak/doStep/
-doContinue directly; breakpoints via Tcl set_bp/remove_bp/list_bp;
-snapshot reads via debug read_block <debuggable> <offset> <size> against
-VRAM, physical VRAM, VDP regs (0x40 -- R0-R46, so the command engine
-registers need no separate source), VDP status regs, VDP palette (RBG
-order, not RGB) and VDP VRAM pointer. msxvdpview.c/msxvdp.h widen
-adam-desktop's vdpview.c/adamvdp_* to V9938/V9958: full mode table
-(TEXT1/2, MULTICOLOR, GRAPHIC1-7 + YJK/YAE), bitmap-mode screen
-rendering, sprite mode 2, palette RAM, 17-bit VRAM, and a new
-command-engine pane (SX/SY/DX/DY/NX/NY/CLR/ARG/CMR + S#2 CE/TR).
-symbols_builtin.c gets an MSX BIOS/BDOS table (CHGET, CHPUT, WRTVDP,
-LDIRVM, ...) instead of ADAM's EOS/OS7. GNOME debugger window ported
-from adam-desktop with the VDP tab's command-engine addition.
+Foundation built and VERIFIED first, before any debugger.c/VDP code, since
+everything else in this milestone depends on it:
+
+  * core/openmsx/msx_host.{hh,cc} -- msxhost_execute_sync(command,
+    result_out, result_max): runs an arbitrary openMSX Tcl command ON the
+    openMSX thread and blocks the caller until it has actually run,
+    returning the Tcl result (or exception message) as text. This is the
+    one primitive the whole debugger is built on: "debug break"/"step"/
+    "cont" (which Debugger.cc forwards straight to
+    MSXCPUInterface::doBreak/doStep/doContinue -- confirmed by reading the
+    source rather than assuming), "debug set_bp"/"remove_bp"/"list_bp",
+    the "reg"/"cpuregs" Tcl procs already in share/scripts/_cpuregs.tcl,
+    and "debug read_block". DEVIATES from the original plan text (which
+    described pause/step/continue calling doBreak/doStep/doContinue
+    directly in C++): decided instead to route everything, including
+    those three, through this one already-proven Tcl RPC rather than add
+    a second, narrower cross-thread primitive next to it -- simpler, and
+    the overhead of one more Tcl command parse is irrelevant next to
+    human reaction time.
+  * A THIRD staged-source patch (tools/openmsx/patches/patch-staged-
+    tree.py, patch_debug_pump_hook()): src/Reactor.cc gets a
+    msxhost_debug_pump() call at the top of every Reactor::run() loop
+    iteration, unconditionally (running or blocked). Necessary because
+    the existing per-frame hook (msxhost_notify_frame(), in
+    PostProcessor::rotateFrames()) stops firing entirely the instant
+    "debug break" halts the CPU -- confirmed by reading Reactor::run()
+    itself: eventDistributor->deliverEvents() runs every iteration
+    regardless of blocked state, so hooking there keeps the command queue
+    and the RPC draining at ~20ms cadence even while broken. Without this
+    patch, every debugger control issued while stopped would hang for
+    msxhost_execute_sync's own 5s timeout.
+  * msxhost_execute_sync_binary(command, result_out, result_max,
+    result_len_out) -- a SECOND RPC primitive, binary-safe, added after
+    reasoning through (not after hitting) a real correctness trap: Tcl's
+    TclObject::getString() forces a bytearray through its UTF-8-ish
+    *string* representation, where byte values above 0x7F expand to
+    multi-byte sequences and 0x00 truncates a C string outright. VDP
+    registers, palette entries and VRAM contents live in exactly that
+    0x00-0xFF range, so "debug read_block ..." results MUST go through
+    this path (TclObject::getBinary(), a std::span<const uint8_t> over
+    the Tcl_Obj's real byte-array storage) and never through
+    msxhost_execute_sync's %s/text path.
+  * core/tests/rpc_test.c (new ctest) -- exercises msxhost_execute_sync
+    directly: a trivial command while running, a register read, "debug
+    break" followed by TWO commands issued while genuinely broken (the
+    case the third patch exists for), "debug cont" with confirmed frame
+    resumption, and a msxhost_execute_sync_binary round-trip of a poked
+    0xAB byte through "debug read_block VRAM 0 1" (would have come back
+    corrupted through the text path -- this is what proves the binary
+    primitive is actually needed, not just defensive).
+
+  VERIFIED end to end: full rebuild after re-staging openMSX from scratch
+  (confirmed via grep that the third patch landed in the fresh
+  Reactor.cc), all 5 ctest cases pass (the 4 from M1-M5 plus the new
+  rpc_test), including the broken-CPU RPC case and the high-byte binary
+  round-trip.
+
+Still to build in this milestone: core/debugger/z80dasm.{c,h} (verbatim
+port from adam-desktop -- same CPU, already tested), core/debugger/
+symbols.{c,h} (verbatim pattern) + a new symbols_builtin.c (MSX BIOS/BDOS
+table -- CHGET, CHPUT, WRTVDP, LDIRVM, ... -- replacing ADAM's EOS/OS7),
+core/include/msxdebug.h (the public engine API, built around
+msxhost_execute_sync/_binary rather than ADAM's exec-hook model) +
+core/debugger/debugger.c (pause/step/breakpoints -- step-over/step-out
+via a conditional one-shot "debug set_bp ... -once <SP-floor condition>"
+at the return address, since openMSX has no native step-over), then the
+VDP widening (core/include/msxvdp.h + core/debugger/msxvdpview.c,
+extending adam-desktop's TMS9918A-only vdpview.c/adamvdp_* to full
+V9938/V9958: mode table TEXT1/2/MULTICOLOR/GRAPHIC1-7 + YJK/YAE, bitmap-
+mode screen rendering, sprite mode 2, palette RAM in RBG order, 17-bit
+VRAM, and a new command-engine pane for SX/SY/DX/DY/NX/NY/CLR/ARG/CMR +
+S#2 CE/TR -- all sourced from the "VDP regs" debuggable, which at 0x40
+bytes already carries R32-R46, no separate source needed), then the
+GNOME debugger window.
 
 
 Then, in order (M7 through M9)
