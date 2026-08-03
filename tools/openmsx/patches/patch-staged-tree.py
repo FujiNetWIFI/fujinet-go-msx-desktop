@@ -779,6 +779,27 @@ def patch_pkgconfig_glib_bool_identifier(stage_dir: str) -> None:
         "\t\t-e 's/gboolean bool;/gboolean bool_val;/' \\\n"
         "\t\t-e 's/change->prev\\.bool;/change->prev.bool_val;/' \\\n"
         "\t\t$(PWD)/$(<D)/glib/glib/goption.c\n"
+        "\t# Same file, unrelated bug: this bundled glib's own G_GSIZE_FORMAT\n"
+        "\t# (glib/glib/gslice.c's three MemChecker fprintf() calls) resolves\n"
+        "\t# to a plain \"u\" on this target -- wrong for a 64-bit size_t on\n"
+        "\t# 64-bit Windows (LLP64: size_t is 8 bytes, plain unsigned int is\n"
+        "\t# 4) -- rather than to something matching size_t's real width.\n"
+        "\t# Confirmed by a real Windows CI run: \"format '%u' expects\n"
+        "\t# argument of type 'unsigned int', but argument ... has type\n"
+        "\t# 'size_t' {aka 'long long unsigned int'}\" at all three call\n"
+        "\t# sites. The arguments printed here (pointer, size, real_size) are\n"
+        "\t# only ever used for a diagnostic message on an already-corrupt-\n"
+        "\t# heap error path, so the standard, portable %zu -- guaranteed\n"
+        "\t# correct for size_t specifically, unlike this old macro -- is a\n"
+        "\t# direct textual substitute: G_GSIZE_FORMAT itself expands to a\n"
+        "\t# quoted string spliced in by C's adjacent-string-literal\n"
+        "\t# concatenation (e.g. \"%\" G_GSIZE_FORMAT \"\\n\"), so replacing the\n"
+        "\t# bare macro token with the literal \"zu\" keeps that concatenation\n"
+        "\t# valid. All 4 occurrences in this file are this exact pattern\n"
+        "\t# (confirmed against the real pinned tarball -- no other use of\n"
+        "\t# the macro exists in gslice.c), so a whole-file replace is safe.\n"
+        "\tsed -i.bak -e 's/G_GSIZE_FORMAT/\"zu\"/g' \\\n"
+        "\t\t$(PWD)/$(<D)/glib/glib/gslice.c\n"
         "\tcd $(@D) && $(PWD)/$(<D)/configure \\\n")
     if old not in text:
         fail(f"{path}: pkg-config configure-recipe anchor not found "
@@ -786,8 +807,8 @@ def patch_pkgconfig_glib_bool_identifier(stage_dir: str) -> None:
     text = text.replace(old, new, 1)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
-    print(f"Patched {path}: renamed pkg-config/glib's `bool` identifier "
-          "in goption.c before configure runs")
+    print(f"Patched {path}: fixed pkg-config/glib's `bool` identifier and "
+          "G_GSIZE_FORMAT before configure runs")
 
 
 def main() -> None:
