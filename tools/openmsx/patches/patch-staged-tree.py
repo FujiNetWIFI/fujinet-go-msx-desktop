@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Twelve patches:
+Thirteen patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -294,6 +294,28 @@ an on-screen keyboard's synthetic back-to-back press+release.
     fallback. Cosmetic only (a missing version string, not a detection
     failure -- header/lib were already found), but a real, verifiable
     bug all the same.
+
+13. build/msysutils.py: a Python-2-only print STATEMENT
+    ("print sys.argv[1]", no parentheses) fixed to a Python 3 print CALL
+    ("print(sys.argv[1])"). This is a real, pre-existing bug in openMSX's
+    own build tooling that patch 12's OSTYPE=msys export (build-openmsx-
+    desktop.sh) immediately exposed: setting OSTYPE=msys makes
+    msysActive() return true, which -- correctly, as intended -- makes
+    build/executils.py route *-config script invocations through `sh -c`
+    (patch 12's whole point). But msysActive() being true ALSO triggers
+    an entirely different, previously-never-exercised code path: this
+    module's own top-level `if msysActive(): msysMounts =
+    _determineMounts()`, which shells out to the SAME python3 interpreter
+    with a hardcoded, never-updated-for-Python-3 command string. A real
+    Windows CI run confirmed exactly this: "Error determining MSYS root:
+    ... SyntaxError: Missing parentheses in call to 'print'. Did you mean
+    print(...)?", immediately after patch 12 first went in -- this whole
+    module has evidently never actually run under a real MSYS2 GCC 16
+    Python 3 environment before, in this project or upstream, since
+    nothing here previously set OSTYPE/MSYSCON at all. `print(x)` is
+    valid, identical syntax under both Python 2 and 3 for a single
+    argument, so this fix carries no risk of breaking whatever Python 2
+    compatibility this file's vintage was originally written for.
 """
 import sys
 
@@ -1045,6 +1067,23 @@ def patch_freetype_pkgconfig_version_flag(stage_dir: str) -> None:
           "the pkg-config fallback path")
 
 
+def patch_msysutils_python3_print(stage_dir: str) -> None:
+    path = f"{stage_dir}/build/msysutils.py"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "print(sys.argv[1])"
+    if marker in text:
+        return  # already patched
+    old = "print sys.argv[1]"
+    if old not in text:
+        fail(f"{path}: Python-2 print-statement anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, marker, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: Python-2 print statement -> Python 3 call")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -1061,6 +1100,7 @@ def main() -> None:
     patch_pkgconfig_path_export(stage_dir)
     patch_cross_pkgconfig_exe_suffix(stage_dir)
     patch_freetype_pkgconfig_version_flag(stage_dir)
+    patch_msysutils_python3_print(stage_dir)
 
 
 if __name__ == "__main__":
