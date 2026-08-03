@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Eight patches:
+Nine patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -158,6 +158,27 @@ Eight patches:
    own code, but cheap to cover" reasoning as setFullScreen() in patch 6 --
    this project never moves or otherwise manages the hidden window's
    position.
+
+9. build/3rdparty.mk (Windows only in practice, but not gated on platform --
+   see below): -std=gnu17 added to the CFLAGS openMSX's own 3rdparty chain
+   passes when configuring its bundled pkg-config's internal glib. That
+   glib is 2013-era code that declares a struct member and later accesses
+   a union member both literally named `bool` (glib/goption.c) -- legal C
+   at the time, since bool was just an ordinary identifier unless a
+   translation unit opted in via <stdbool.h>. A real Windows CI run failed
+   here with "two or more data types in declaration specifiers" and
+   "expected identifier before 'bool'" at exactly those two spots: the
+   MinGW-w64 GCC this project's windows.yml pulls in defaults to -std=
+   gnu23, where bool/true/false became real keywords, so `gboolean bool;`
+   is parsed as two competing type-specifiers rather than a declaration.
+   -std=gnu17 restores the dialect this bundled module was actually
+   written against; it is scoped to this single configure line (this
+   module's own build only), so it cannot affect openMSX's own C++23 code
+   or this project's. Not gated on __APPLE__/__linux__ in this script
+   because the anchor and fix apply equally to any host GCC new enough to
+   default to gnu23 -- Windows is simply the only CI platform where that
+   happens to be true today (macOS's Apple Clang and this project's Linux
+   CI runner's GCC do not, as of this pass).
 
 Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
@@ -693,6 +714,32 @@ def patch_darwin_blocks_flag(stage_dir: str) -> None:
     print(f"Patched {path}: -fblocks added to TARGET_FLAGS")
 
 
+def patch_windows_pkgconfig_glib_std(stage_dir: str) -> None:
+    path = f"{stage_dir}/build/3rdparty.mk"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "-std=gnu17"
+    if marker in text:
+        return  # already patched
+    old = '\t\tCFLAGS="-Wno-error=int-conversion" \\\n'
+    new = (
+        "\t\t# FujiNet Go MSX (desktop): see patch-staged-tree.py -- this\n"
+        "\t\t# bundled pkg-config's internal glib (2013-era) declares a\n"
+        "\t\t# struct/union member literally named `bool` (glib/goption.c),\n"
+        "\t\t# which a host GCC whose default C dialect is gnu23 rejects,\n"
+        "\t\t# since bool/true/false became real keywords in C23. -std=\n"
+        f"\t\t# gnu17 restores the dialect this code was actually written\n"
+        "\t\t# against; scoped to this module's own configure line only.\n"
+        f'\t\tCFLAGS="-Wno-error=int-conversion {marker}" \\\n')
+    if old not in text:
+        fail(f"{path}: pkg-config/glib CFLAGS anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: -std=gnu17 added to pkg-config/glib's CFLAGS")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -705,6 +752,7 @@ def main() -> None:
     patch_macos_main_thread_window(stage_dir)
     patch_macos_window_teardown(stage_dir)
     patch_darwin_blocks_flag(stage_dir)
+    patch_windows_pkgconfig_glib_std(stage_dir)
 
 
 if __name__ == "__main__":
