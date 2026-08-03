@@ -112,6 +112,34 @@ void report_boot_result(int status) {
     g_boot_cv.notify_all();
 }
 
+// Waits (up to 5s) for g_rpc.done under the already-held g_rpc_mutex lock.
+// On macOS, services the main thread's dispatch queue while waiting
+// instead of blocking blindly on the condition variable -- same reasoning
+// as msxhost_core_start()'s own boot-wait (see that function's comment):
+// VisibleSurface's window-mutating calls (patch-staged-tree.py) can
+// dispatch_sync back onto whichever thread calls msxhost_execute_sync(),
+// at essentially any point during normal MSX operation (a machine switch
+// or video-mode change triggers updateWindowTitle()/resize()), not just
+// during the initial boot -- confirmed by a real macOS CI run where every
+// RPC call after the very first machine switch timed out, consistent with
+// the openMSX thread being wedged inside a dispatch_sync that this
+// caller's plain condition_variable::wait_for was never going to service.
+bool wait_rpc_done(std::unique_lock<std::mutex>& lk) {
+#ifdef __APPLE__
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!g_rpc.done && std::chrono::steady_clock::now() < deadline) {
+        lk.unlock();
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+        lk.lock();
+    }
+    return g_rpc.done;
+#else
+    return g_rpc_cv.wait_for(lk, std::chrono::seconds(5),
+                             [] { return g_rpc.done; });
+#endif
+}
+
 void drain_pending_events() {
     if (!g_reactor) return;
     std::vector<openmsx::Event> pending;
@@ -650,8 +678,7 @@ int msxhost_execute_sync(const char* command, char* result_out, int result_max) 
     // read_block over the largest VRAM debuggable is microseconds of actual
     // work once service_pending_rpc() runs; the wait is for the *pump*
     // cadence (up to ~20ms while broken), not the command itself.
-    bool got = g_rpc_cv.wait_for(lk, std::chrono::seconds(5),
-                                 [] { return g_rpc.done; });
+    bool got = wait_rpc_done(lk);
 
     int ok = 0;
     if (got) {
@@ -678,8 +705,7 @@ int msxhost_execute_sync_binary(const char* command, uint8_t* result_out,
     g_rpc.binary = true;
     g_rpc.command = command;
 
-    bool got = g_rpc_cv.wait_for(lk, std::chrono::seconds(5),
-                                 [] { return g_rpc.done; });
+    bool got = wait_rpc_done(lk);
 
     int ok = 0;
     if (got) {
