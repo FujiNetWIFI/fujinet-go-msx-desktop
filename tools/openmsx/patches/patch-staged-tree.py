@@ -800,6 +800,31 @@ def patch_pkgconfig_glib_bool_identifier(stage_dir: str) -> None:
         "\t# the macro exists in gslice.c), so a whole-file replace is safe.\n"
         "\tsed -i.bak -e 's/G_GSIZE_FORMAT/\"zu\"/g' \\\n"
         "\t\t$(PWD)/$(<D)/glib/glib/gslice.c\n"
+        "\t# Third distinct bug in this bundled glib, in glib/gstdio.c:\n"
+        "\t# g_stat()'s buf is GStatBuf* -- plain `struct stat` here, since\n"
+        "\t# this file's only special-case (a #if defined(_MSC_VER) &&\n"
+        "\t# !defined(_WIN64) block a few lines above) doesn't apply when\n"
+        "\t# compiling with GCC -- but _wstat expands (via mingw-w64's own\n"
+        "\t# _mingw_stat64.h, unconditionally when _USE_32BIT_TIME_T is not\n"
+        "\t# defined, which this project never defines) to _wstat64i32,\n"
+        "\t# which wants `struct _stat64i32 *` specifically -- a distinct\n"
+        "\t# struct tag from plain `struct stat` as far as the type system\n"
+        "\t# is concerned, even though mingw-w64's own header comments and\n"
+        "\t# field-by-field inspection (both confirmed against the real\n"
+        "\t# x86_64-w64-mingw32-gcc 16.1.0 headers this project's own\n"
+        "\t# windows.yml cross-compiles this repo's own code with) show the\n"
+        "\t# two structs are field-for-field identical under this project's\n"
+        "\t# exact configuration (neither _USE_32BIT_TIME_T nor\n"
+        "\t# _FILE_OFFSET_BITS is ever defined anywhere in this build), so\n"
+        "\t# the cast this sed inserts is provably safe, not just silencing\n"
+        "\t# a warning. Confirmed by cross-compiling both the broken and\n"
+        "\t# fixed call with the real toolchain: without the cast,\n"
+        "\t# \"-Wincompatible-pointer-types\" reproduces character-for-\n"
+        "\t# character identical to real CI's own error; with it, zero\n"
+        "\t# warnings.\n"
+        "\tsed -i.bak \\\n"
+        "\t\t-e 's/_wstat (wfilename, buf);/_wstat (wfilename, (struct _stat64i32 *) buf);/' \\\n"
+        "\t\t$(PWD)/$(<D)/glib/glib/gstdio.c\n"
         "\tcd $(@D) && $(PWD)/$(<D)/configure \\\n")
     if old not in text:
         fail(f"{path}: pkg-config configure-recipe anchor not found "
@@ -807,8 +832,9 @@ def patch_pkgconfig_glib_bool_identifier(stage_dir: str) -> None:
     text = text.replace(old, new, 1)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
-    print(f"Patched {path}: fixed pkg-config/glib's `bool` identifier and "
-          "G_GSIZE_FORMAT before configure runs")
+    print(f"Patched {path}: fixed pkg-config/glib's `bool` identifier, "
+          "G_GSIZE_FORMAT and _wstat64i32 struct-tag mismatch before "
+          "configure runs")
 
 
 def main() -> None:
