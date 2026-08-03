@@ -111,12 +111,24 @@ int main(void)
      * fresh snapshot, and confirm the physical-VRAM hex dump shows exactly
      * that byte at that address -- proves the snapshot's binary-safe
      * capture (msxhost_execute_sync_binary) actually reflects live state,
-     * not a stale/zeroed buffer. */
+     * not a stale/zeroed buffer.
+     *
+     * Paused for the whole poke+snapshot: C-BIOS's boot code is actively
+     * running (and actively driving the VDP/VRAM) at this point, so poking
+     * a byte while free-running is a genuine race against the running MSX
+     * software, which can overwrite it before the snapshot reads it back
+     * -- caught for real on a GitHub Actions Linux runner (this exact
+     * assertion failed there while passing reliably on the maintainer's
+     * own dev machine, byte-timing-dependent rather than environment-
+     * dependent as such). msxdebug_pause() makes the outcome deterministic
+     * instead of luck-of-the-timing. */
     {
         uint8_t poke_byte = 0x5A;
         uint16_t addr = 0x1234;
         msxvdp_snapshot snap;
         char hex[256];
+
+        msxdebug_pause(d);
 
         /* VDP debug commands are keyed by name, not a msxdebug API of
          * their own for VRAM writes yet (this pass's scope -- see
@@ -135,6 +147,7 @@ int main(void)
             }
         }
         msxdebug_vdp_snapshot(d, MSXVDP_CHIP_V9938, &snap);
+        msxdebug_resume(d);
         if (addr < snap.vram_size && snap.vram[addr] != poke_byte) {
             fprintf(stderr, "vdp_test: after poking 0x%02X at VRAM $%04X, "
                             "snapshot shows 0x%02X\n", poke_byte, addr,
