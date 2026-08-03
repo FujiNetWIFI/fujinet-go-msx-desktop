@@ -790,11 +790,70 @@ Done (this pass) -- M8
   new desktop-entry/metainfo validation tests), and a real `cpack -G TGZ`
   archive was built and its contents inspected directly.
 
-Then, in order (M9)
---------------------
+Done (this pass) -- M9 (in progress)
+------------------------------------
 
-  M9  macOS (AppKit) + Windows (Win32) frontends and their debugger
-      windows, build-aux/windows/installer.nsi, release.yml, v0.1.0.
+  Both native frontends and their debugger windows are written. Neither has
+  been run on real hardware (no Mac or Windows box in this development
+  environment) -- verification is real CI (macos.yml/windows.yml) plus, for
+  Windows, real cross-compilation smoke tests done locally (see below).
+  This matches how macOS/Windows CI itself was already being handled since
+  M7.
+
+  * frontends/macos/ -- AppKit, ported from fujinet-go-coco-desktop's
+    frontend, not copied line-for-line. MSX has no CoCo-style TV-input/
+    Artifact-Colour/CPU menus and no configurable aspect_mode/
+    smooth_scaling settings at all (openMSX's own
+    FrameSource::getLinePtr640_480() fixes the frame geometry before
+    msxsession ever sees it), so there is no Settings window; Machine is a
+    fixed 3-entry table (MSX/MSX2/MSX2+), not a runtime-walked name table.
+    FujiNet Configuration opens the system browser, matching the GNOME
+    frontend's own current choice (no embedded WKWebView yet on either).
+    The debugger window (DebuggerWindow.h/.m) uses the real
+    msxdebug_set_stop_callback (dispatch_async to the main queue) rather
+    than a poll loop, has editable registers/memory (msxdebug_set_regs/
+    write_mem both exist), and has a real VDP tab (nametable/pattern/
+    sprite/palette NSImageViews, decoded state text, a VRAM hex editor)
+    that CoCo's own debugger has no equivalent of.
+  * frontends/windows/ -- Win32 (GDI + DwmFlush vsync), ported from
+    fujinet-go-coco-desktop's frontend. Same simplifications as macOS: no
+    TV-input/CCR/CPU/Settings, fixed 3-entry Machine table, fixed 640x480
+    frame (msxsession_copy_frame reports no per-frame w/h -- MSXSESSION_
+    FB_WIDTH x MSXSESSION_FB_HEIGHT is the only size that ever exists), no
+    session restart needed anywhere (msxsession_set_machine switches live).
+    The debugger window (debugger/dbg_window.c) follows fujinet-go-adam-
+    desktop's Windows debugger mechanics (PostMessage-marshaled stop
+    callback, a 100ms live-tick timer for registers/VDP while running,
+    RGBA->BGRA conversion for the VDP pictures) trimmed from ADAM's four
+    tabs to two (CPU, VDP -- msxdebug has no instruction-trace ring, and
+    the VDP register/status/command-engine text and VRAM hex editor share
+    one tab rather than getting a separate "VDP RAM" page).
+  * frontends/windows/app.ico -- generated from the same master render
+    tools/icons/make-icons.py produces (data/icons/src/fujinet-go-msx-
+    foreground.png over the MSX brand blue, rounded square), via a one-off
+    Pillow ICO write (16/32/48/256px) -- matching how the sibling repos'
+    own app.ico files were produced (make-icons.py itself only emits
+    hicolor PNGs + .icns; ICO was always a separate one-off, not part of
+    that script in any sibling either).
+  * Verified for real, not just written: both new Win32 source files
+    (main.c, debugger/dbg_window.c) and resource.rc compile cleanly with
+    zero warnings against the real x86_64-w64-mingw32-gcc/windres cross
+    toolchain (available on this dev machine, unlike a Windows box itself)
+    -- a compile-only smoke test per cmake/toolchains/mingw-w64.cmake's own
+    documented scope (a full link needs openMSX cross-built for mingw,
+    which that toolchain file explicitly does not attempt). `nm` on the
+    resulting objects confirms every undefined symbol is either a standard
+    Win32 API call or a real msxsession_*/msxdebug_*/msxvdp_* function --
+    nothing stray.
+
+  NOT done yet: build-aux/windows/installer.nsi, release.yml, v0.1.0 --
+  the remaining M9 items, picked up next.
+
+Then, in order (M9 continued)
+------------------------------
+
+  build-aux/windows/installer.nsi (NSIS installer, now that the Windows
+  frontend exists), release.yml, then cut v0.1.0.
 
 
 Known issues / things to remember
