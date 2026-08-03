@@ -23,11 +23,17 @@ add_library(msxsession STATIC
   src/input_map.c
   src/fujinet_runtime.c
   openmsx/msx_host.cc
+  debugger/z80dasm.c
+  debugger/symbols.c
+  debugger/symbols_builtin.c
+  debugger/debugger.c
+  debugger/msxvdpview.c
 )
 target_link_libraries(msxsession PUBLIC openmsx-lib PkgConfig::SDL2 Threads::Threads)
 target_include_directories(msxsession
   PUBLIC "${CMAKE_SOURCE_DIR}/core/include"
-  PRIVATE "${CMAKE_SOURCE_DIR}/core/src" "${CMAKE_SOURCE_DIR}/core/openmsx")
+  PRIVATE "${CMAKE_SOURCE_DIR}/core/src" "${CMAKE_SOURCE_DIR}/core/openmsx"
+          "${CMAKE_SOURCE_DIR}/core/debugger")
 # -Wno-format-truncation: the path layer composes MSX_PATH_MAX-sized buffers
 # from other max-sized buffers; snprintf truncation is the intended clamp
 # there, not a bug (same reasoning as the sibling repos' path.c).
@@ -118,3 +124,27 @@ target_link_libraries(rpc_test PRIVATE msxsession)
 target_include_directories(rpc_test PRIVATE "${CMAKE_SOURCE_DIR}/core/openmsx")
 add_test(NAME rpc_test COMMAND rpc_test)
 set_tests_properties(rpc_test PROPERTIES TIMEOUT 60)
+
+# M6 gate: the Z80 disassembler's golden-file corpus, ported verbatim from
+# adam-desktop (same CPU, same tests, only the MSXDASM_ prefix renamed).
+add_executable(dasm_test tests/dasm_test.c)
+target_link_libraries(dasm_test PRIVATE msxsession)
+target_include_directories(dasm_test PRIVATE "${CMAKE_SOURCE_DIR}/core/debugger")
+add_test(NAME dasm_test COMMAND dasm_test)
+
+# M6 gate: the debugger engine (pause/step/breakpoints/disassembly) against
+# a real running boot, including a persistent breakpoint firing
+# autonomously and being delivered through the engine's own poll thread.
+add_executable(debugger_test tests/debugger_test.c)
+target_link_libraries(debugger_test PRIVATE msxsession Threads::Threads)
+add_test(NAME debugger_test COMMAND debugger_test)
+set_tests_properties(debugger_test PROPERTIES TIMEOUT 60)
+
+# M6 gate: the VDP snapshot/decode path against a real running boot --
+# mode decode, a VRAM poke round-tripping through the snapshot, and the
+# palette renderer.
+add_executable(vdp_test tests/vdp_test.c)
+target_link_libraries(vdp_test PRIVATE msxsession)
+target_include_directories(vdp_test PRIVATE "${CMAKE_SOURCE_DIR}/core/openmsx")
+add_test(NAME vdp_test COMMAND vdp_test)
+set_tests_properties(vdp_test PROPERTIES TIMEOUT 60)

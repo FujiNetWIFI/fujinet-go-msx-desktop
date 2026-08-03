@@ -138,6 +138,7 @@ void msxsession_free(msxsession *s)
 {
     if (!s) return;
     msxsession_stop(s);
+    msxdebug_destroy(s->debugger);
     msxsession_settings_flush(s);
     settings_free_all(s);
     pthread_mutex_destroy(&s->lifecycle_mtx);

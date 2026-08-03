@@ -468,23 +468,110 @@ everything else in this milestone depends on it:
   rpc_test), including the broken-CPU RPC case and the high-byte binary
   round-trip.
 
-Still to build in this milestone: core/debugger/z80dasm.{c,h} (verbatim
-port from adam-desktop -- same CPU, already tested), core/debugger/
-symbols.{c,h} (verbatim pattern) + a new symbols_builtin.c (MSX BIOS/BDOS
-table -- CHGET, CHPUT, WRTVDP, LDIRVM, ... -- replacing ADAM's EOS/OS7),
-core/include/msxdebug.h (the public engine API, built around
-msxhost_execute_sync/_binary rather than ADAM's exec-hook model) +
-core/debugger/debugger.c (pause/step/breakpoints -- step-over/step-out
-via a conditional one-shot "debug set_bp ... -once <SP-floor condition>"
-at the return address, since openMSX has no native step-over), then the
-VDP widening (core/include/msxvdp.h + core/debugger/msxvdpview.c,
-extending adam-desktop's TMS9918A-only vdpview.c/adamvdp_* to full
-V9938/V9958: mode table TEXT1/2/MULTICOLOR/GRAPHIC1-7 + YJK/YAE, bitmap-
-mode screen rendering, sprite mode 2, palette RAM in RBG order, 17-bit
-VRAM, and a new command-engine pane for SX/SY/DX/DY/NX/NY/CLR/ARG/CMR +
-S#2 CE/TR -- all sourced from the "VDP regs" debuggable, which at 0x40
-bytes already carries R32-R46, no separate source needed), then the
-GNOME debugger window.
+Second pass, all VERIFIED end to end against a genuine from-scratch
+rebuild (rm -rf core/openmsx-generated tools/openmsx/work build; a fresh
+third_party/fujinet-firmware clone happened too, since the FUJINET_SRC
+override was only ever a build-dir cache value) plus ctest:
+
+  * core/debugger/z80dasm.{c,h} -- ported verbatim from adam-desktop
+    (ADAMDASM_ -> MSXDASM_, #include "adamdebug.h" -> "msxdebug.h", no
+    other changes -- same CPU). core/tests/dasm_test.c ported the same
+    way (same golden-file corpus).
+  * core/debugger/symbols.{c,h} -- ported verbatim (generic .sym-format
+    parser, nothing ADAM-specific was in it to rename beyond the header
+    guard and the builtin-table extern).
+  * core/debugger/symbols_builtin.c -- NOT a port (ADAM's was machine-
+    generated from a verified EOS/OS7 disassembly this project has no
+    equivalent of). Deliberately SMALL and conservative rather than a
+    guessed-at full BIOS jump table: the VDP/PSG/cassette/keyboard/
+    printer I/O block (WRTVDP $47 through LPTSTT $A8, internally self-
+    consistent -- every entry is a 3-byte JP slot at a fixed stride, NMI
+    at $66 skipped since that address is CPU-wired not BIOS-assigned) plus
+    the two best-known interrupt hooks (H.KEYI $FD9A, H.TIMI $FD9F). The
+    slot-primitive block (RDSLT/WRSLT/CALSLT/ENASLT/CALLF) is NOT included
+    -- addresses recalled with lower confidence, left to
+    msxdebug_symbols_load() from a verified external table instead of
+    risking wrong "facts" in a shipped product.
+  * core/include/msxdebug.h + core/debugger/debugger.c -- the engine,
+    built entirely on msxhost_execute_sync/_binary (M6 part 1's RPC), NOT
+    on an exec hook (openMSX has none exposed to us, and one Tcl round
+    trip per instruction is many orders of magnitude too slow to trace at
+    full CPU speed -- so unlike ADAM, this engine has NO instruction-trace
+    ring; scope cut, stated plainly, same as M4's gamepad-binding cut).
+    DEVIATES from the milestone's own original plan text (which said
+    pause/step/continue would call doBreak/doStep/doContinue directly in
+    C++): everything, including those three, goes through the one already-
+    proven msxhost_execute_sync RPC instead -- simpler than adding a
+    second narrower primitive, and irrelevant overhead next to human
+    reaction time. Two ways a stop is discovered: synchronously inline
+    (pause/step_into, which block for their own RPC and call the
+    callback directly) or via a small poll thread the engine owns
+    (persistent breakpoints and step_over/step_out/run_to's transient
+    one-shot conditional breakpoints, none of which have a push
+    notification over the Tcl interface). step_over/step_out use a
+    one-shot "debug set_bp -once <target> {[reg SP] >=|> <floor>}" at the
+    return address -- the same SP-floor trick ADAM's exec hook used,
+    expressed as a Tcl condition since openMSX has no native step-over.
+
+    TWO REAL BUGS caught by core/tests/debugger_test.c (a new ctest
+    exercising pause/step/disassembly/a real autonomous breakpoint against
+    a live boot), both fixed before this pass closed:
+      1. d->pending_reason relied on calloc-zero-init, but
+         MSXDBG_STOP_PAUSE is enum value 0 -- so the very first autonomous
+         breakpoint ever hit reported reason PAUSE instead of BREAKPOINT.
+         Fixed: msxdebug_create() now explicitly initializes it to
+         MSXDBG_STOP_BREAKPOINT.
+      2. A genuine race in msxdebug_resume() (and the step_over/step_out/
+         run_to helper): d->mtx was released, with paused set to 0, BEFORE
+         "debug cont" was actually issued -- during that window the poll
+         thread could observe paused==0, immediately check "debug
+         breaked" (still true from whatever broke it BEFORE this resume),
+         and misreport a stale stop at the OLD pc. debugger_test caught it
+         directly: a breakpoint set several instructions ahead fired
+         "immediately" at the pre-resume PC instead of the real target.
+         Fixed by holding d->mtx across "debug cont" itself in all three
+         places, not just the state update before it (safe: a different
+         mutex than msxhost_execute_sync's own, no deadlock).
+  * core/include/msxvdp.h + core/debugger/msxvdpview.c -- the VDP debugger,
+    SCOPE STATED PLAINLY rather than silently narrowed from the original
+    plan's "full V9938/V9958 widening": snapshot capture (via
+    msxhost_execute_sync_binary against the "physical VRAM", "VDP regs"
+    (0x40 bytes -- R32-R46 the command engine included, no separate
+    source), "VDP status regs", "VDP palette" and "VRAM pointer"
+    debuggables -- names confirmed by reading VDP.cc/VDPVRAM.cc directly,
+    not assumed; NOTE the last one is bare "VRAM pointer", not "VDP VRAM
+    pointer" as an earlier planning note in this file assumed), the full
+    V9938/V9958 mode table (TEXT1/2, MULTICOLOR, GRAPHIC1-7, YJK/YAE),
+    decoded via openMSX's OWN src/video/DisplayMode.hh bit arithmetic
+    (read directly from that source while writing this, not reconstructed
+    from memory -- exactly as authoritative as openMSX's own renderer),
+    register/status/command-engine text description, a physical-VRAM hex
+    dump, and palette-swatch rendering (V9938/58 palette RAM in RBG order,
+    falling back to the fixed TMS9918A table on V9918). NOT done in this
+    pass: nametable/pattern/sprite RASTER rendering for the V9938-only
+    bitmap modes (Graphic 4-7), sprite mode 2, and YJK/YAE color decode --
+    msxvdp_render_nametable/_patterns/_sprites render the MSX1-compatible
+    modes (Graphic 1/2/3, Multicolor, Text 1) exactly as ADAM's vdpview.c
+    validated, and fill a mid-gray placeholder for anything else rather
+    than render garbage (the same honest-failure precedent
+    ADAMVDP_MODE_INVALID set). Revisit as a follow-up pass; the register/
+    status/palette/memory side a debugger session actually needs first is
+    complete and tested.
+  * core/tests/vdp_test.c (new ctest) -- a real snapshot against a live
+    MSX2 boot decodes to a non-"undefined" mode, a VRAM poke via "debug
+    write" round-trips through the snapshot's binary-safe capture and
+    shows up correctly in the hex dump, and the palette renderer produces
+    a non-uniform buffer.
+
+  NOT yet done in M6: the GNOME debugger window (frontends/gnome/
+  debugger/dbg_window.c) and wiring F12 into the frontends. The engine and
+  VDP decoder underneath it are built and tested; nothing sits on top of
+  them in the UI yet.
+
+  VERIFIED end to end: full 8-test ctest suite (the 4 from M1-M5, rpc_test,
+  and the three new this pass -- dasm_test, debugger_test, vdp_test) passes
+  after forcing a completely fresh rebuild (re-staged openMSX, re-cloned
+  fujinet-firmware, fresh build/ directory) -- not just an in-place rebuild.
 
 
 Then, in order (M7 through M9)
