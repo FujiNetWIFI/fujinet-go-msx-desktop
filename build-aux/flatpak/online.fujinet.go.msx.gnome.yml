@@ -126,7 +126,13 @@ modules:
     buildsystem: simple
     build-commands:
       - make GLEW_DEST=/app
-      - make GLEW_DEST=/app install.include install.lib install.pc
+      - make GLEW_DEST=/app install.include install.lib
+      # No "install.pc" target in this Makefile (confirmed by a real
+      # failure here: "No rule to make target 'install.pc'") -- install.lib
+      # generates glew.pc as a side effect but never copies it anywhere,
+      # so do that by hand. install.lib itself installs to /app/lib64 on
+      # this (64-bit) build host, so the pkgconfig file goes there too.
+      - install -Dm644 glew.pc /app/lib64/pkgconfig/glew.pc
     sources:
       - type: archive
         url: https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.tgz
