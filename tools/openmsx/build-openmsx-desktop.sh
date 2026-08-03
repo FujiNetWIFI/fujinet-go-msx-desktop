@@ -122,6 +122,19 @@ DERIVED_DIR=$(find derived -maxdepth 1 -mindepth 1 -type d | sort | tail -1)
 [[ -n "${DERIVED_DIR}" ]] || fail "no derived/<platform> build directory produced"
 echo "    build directory: ${DERIVED_DIR}"
 
+# Diagnostic only, no behavior change: build/probe.py's own library-
+# detection step (config/probed_defs.mk) writes its detailed reasoning --
+# the actual command line and stderr for every getCompileFlags/getLinkFlags/
+# getVersion probe -- to this log, but only ever *references* its path in
+# its terse "Found libraries: ... no" console summary, never prints its
+# content. Surfacing it here (once, on this platform's config dir) is what
+# actually explains a "no" beyond the single word.
+PROBE_LOG="${DERIVED_DIR}/config/probe.log"
+if [[ -f "${PROBE_LOG}" ]]; then
+    echo "==> Contents of ${PROBE_LOG}:"
+    cat "${PROBE_LOG}"
+fi
+
 popd >/dev/null
 
 mkdir -p "${WORK_OUT}/lib" "${WORK_OUT}/include/openmsx-config"
