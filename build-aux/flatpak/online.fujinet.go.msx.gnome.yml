@@ -115,10 +115,17 @@ modules:
         url: https://downloads.xiph.org/releases/theora/libtheora-1.1.1.tar.gz
         sha256: 40952956c47811928d1e7922cda3bc1f427eb75680c3c37249c91e949054916b
 
+  # NOT "make extensions" first: that target regenerates glew.c/glew.h from
+  # a live OpenGL-Registry git checkout, which needs network access the
+  # sandboxed build phase does not have (confirmed by a real failure here:
+  # "Error 128" cloning OpenGL-Registry). It is also unnecessary -- the
+  # release tarball already ships the pre-generated headers/sources a
+  # normal build needs; "extensions" is a maintainer-only regeneration
+  # step, not part of the ordinary build.
   - name: glew
     buildsystem: simple
     build-commands:
-      - make GLEW_DEST=/app extensions
+      - make GLEW_DEST=/app
       - make GLEW_DEST=/app install.include install.lib install.pc
     sources:
       - type: archive
