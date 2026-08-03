@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Four patches:
+Five patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -54,6 +54,29 @@ Four patches:
    surfacing exactly the gap the original per-platform capture plan
    anticipated (see msx_host.cc's own comment) but that was never actually
    implemented: without this patch that real window would be visible.
+
+5. src/events/InputEventGenerator.cc: InputEventGenerator::poll() -- called
+   every Reactor::run() loop iteration via EventDistributor::deliverEvents()
+   -- made a no-op. This project's own host never relies on SDL's native
+   event queue for anything: keyboard/joystick input is injected straight
+   into EventDistributor by msx_host.cc's own drain_pending_events()
+   (msxhost_inject_key et al.), and the openMSX-native window is either
+   hidden (patch 4, macOS/Windows) or does not exist at all (Linux's
+   "offscreen" driver), so there are never any real SDL window events
+   worth polling for either. poll()'s SDL_PollEvent call was, in this
+   project's design, always pure overhead -- except on macOS, where it is
+   actively fatal: SDL_PollEvent pumps the platform event queue when it is
+   empty, and Cocoa's pump (Cocoa_PumpEventsUntilDate) hard-requires the
+   main thread for its entire lifetime, not just at startup -- and
+   Reactor::run() (and so this call) executes on this project's own
+   dedicated openMSX thread on every platform, confirmed by a real macOS
+   CI run crashing with "'nextEventMatchingMask should only be called
+   from the Main Thread!'" once the two earlier main-thread bugs (see
+   msx_host.cc's own comments) were already fixed and stopped masking
+   this one. Skipping the call entirely sidesteps the conflict at its
+   root rather than trying to relocate when it runs -- unlike patches 1-4,
+   there is no known legitimate purpose for this call in this project's
+   architecture, on any platform.
 
 Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
@@ -215,6 +238,36 @@ def patch_hidden_window(stage_dir: str) -> None:
     print(f"Patched {path}: SDL_WINDOW_HIDDEN added to window creation flags")
 
 
+def patch_disable_input_poll(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/events/InputEventGenerator.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "FujiNet Go MSX (desktop): no-op"
+    if marker in text:
+        return  # already patched
+    old = "void InputEventGenerator::poll()\n{\n"
+    new = (
+        "void InputEventGenerator::poll()\n"
+        "{\n"
+        f"\t// {marker} -- see patch-staged-tree.py.\n"
+        "\t// This project's own host never relies on SDL's native event\n"
+        "\t// queue (input is injected straight into EventDistributor by\n"
+        "\t// msx_host.cc; the openMSX-native window is hidden or does not\n"
+        "\t// exist at all), and on macOS the SDL_PollEvent call below is\n"
+        "\t// actively fatal from this thread (Cocoa's event pump hard-\n"
+        "\t// requires the main thread; Reactor::run(), which reaches this\n"
+        "\t// via EventDistributor::deliverEvents(), always runs on this\n"
+        "\t// project's own dedicated openMSX thread instead).\n"
+        "\treturn;\n")
+    if old not in text:
+        fail(f"{path}: InputEventGenerator::poll() anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: InputEventGenerator::poll() made a no-op")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -223,6 +276,7 @@ def main() -> None:
     patch_frame_hook(stage_dir)
     patch_debug_pump_hook(stage_dir)
     patch_hidden_window(stage_dir)
+    patch_disable_input_poll(stage_dir)
 
 
 if __name__ == "__main__":
