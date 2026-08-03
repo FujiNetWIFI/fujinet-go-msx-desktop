@@ -217,32 +217,13 @@ void openmsx_thread_main() {
     // this file) is never meant to be shown to the user on any platform --
     // see the SDL_WINDOW_HIDDEN patch in patch-staged-tree.py.
     //
-    // Linux only forces SDL's "offscreen" video driver: a real EGL headless
-    // pbuffer, so there is no window (hidden or otherwise) and no real
-    // display server dependency at all -- validated by the Android sibling
-    // and by this project's own Linux CI, which boots real C-BIOS sessions
-    // on a headless runner with no X/Wayland server. "offscreen" is an
-    // EGL-backed driver with no equivalent on macOS/Windows (Apple removed
-    // EGL from desktop macOS; SDL2 does not build the offscreen backend for
-    // either platform at all) -- forcing it there unconditionally was a
-    // real bug: SDL2 silently falls back to the platform's real driver
-    // (cocoa/windows) regardless of the SDL_HINT_OVERRIDE priority, so the
-    // hint did nothing useful there but was never removed, and a real
-    // macOS CI run's "renderer init failed: Could not create window: Could
-    // not initialize OpenGL / GLES library" surfaced the gap the original
-    // per-platform plan had already anticipated (a hidden real window on
-    // macOS/Windows, vs. Linux's headless EGL pbuffer) but never actually
-    // implemented. macOS/Windows now rely solely on the hidden-window
-    // patch below to stay invisible, using their platform's normal video
-    // driver and a real (if never shown) GL context -- exactly what a
-    // desktop session with a real GPU and window server provides.
-#ifdef __linux__
-    SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "offscreen", SDL_HINT_OVERRIDE);
-#endif
-    // openMSX's own main.cc normally has SDL_main call SDL_SetMainReady; we
-    // boot the Reactor directly, so SDL_InitSubSystem would otherwise refuse
-    // to run ("Application didn't initialize properly").
-    SDL_SetMainReady();
+    // The video driver hint, SDL_SetMainReady() and SDL_INIT_VIDEO itself
+    // are all set up by msxhost_core_start(), on the caller's (main)
+    // thread, before this thread is even spawned -- see that function's
+    // own comment for why: in short, macOS's Cocoa driver does one-time
+    // NSApplication setup that AppKit requires to happen on the main
+    // thread, and this thread is never it. SDL_InitSubSystem is
+    // reference-counted, so nothing further is needed here.
 
     // Heap-allocate the Reactor so a boot exception doesn't run its
     // destructor on a half-constructed object (crashes in ~Subject<Setting>)
@@ -422,6 +403,52 @@ int msxhost_core_start(void) {
     g_boot_status = 0;
     g_last_error.clear();
     g_omsx_thread_done.store(false);
+
+    // Linux only forces SDL's "offscreen" video driver: a real EGL headless
+    // pbuffer, so there is no window (hidden or otherwise) and no real
+    // display server dependency at all -- validated by the Android sibling
+    // and by this project's own Linux CI, which boots real C-BIOS sessions
+    // on a headless runner with no X/Wayland server. "offscreen" is an
+    // EGL-backed driver with no equivalent on macOS/Windows (Apple removed
+    // EGL from desktop macOS; SDL2 does not build the offscreen backend for
+    // either platform at all) -- forcing it there unconditionally used to
+    // be a real bug (see the openmsx_thread_main() comment above this
+    // function's old location of this hint, before it moved here). macOS/
+    // Windows rely on the SDL_WINDOW_HIDDEN patch (patch-staged-tree.py) to
+    // stay invisible instead, using their platform's normal video driver.
+#ifdef __linux__
+    SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "offscreen", SDL_HINT_OVERRIDE);
+#endif
+    // openMSX's own main.cc normally has SDL_main call SDL_SetMainReady;
+    // boot the Reactor directly (as openmsx_thread_main() below does) and
+    // SDL_InitSubSystem refuses to run at all ("Application didn't
+    // initialize properly") -- so this has to come before the
+    // SDL_InitSubSystem call right below it, not just before openMSX's own
+    // internal one.
+    SDL_SetMainReady();
+
+    // Initialise SDL's video subsystem HERE, synchronously, on the
+    // caller's thread -- which is always the process's real main thread
+    // (every frontend and every test's main() calls msxsession_start(),
+    // which reaches this function directly, before any of its own
+    // threading starts). This must NOT happen for the first time on the
+    // openMSX thread: on macOS, SDL's Cocoa driver does one-time
+    // NSApplication setup (Cocoa_RegisterApp, which sets the process's
+    // main menu) as part of this same call, and AppKit hard-requires that
+    // happen on the main thread -- confirmed by a real macOS CI run
+    // crashing with "API misuse: setting the main menu on a non-main
+    // thread" once the previous "renderer init failed" bug (a separate
+    // issue, now fixed) stopped masking it. SDL_InitSubSystem is
+    // reference-counted per subsystem, so openMSX's own internal video
+    // init (inside Reactor/Display, deep in openmsx_thread_main() below)
+    // is a cheap no-op re-increment once this has already run on the main
+    // thread -- it does not redo Cocoa_RegisterApp a second time on the
+    // wrong thread. Reactor's destructor tears SDL video down again at the
+    // end of every clean run (see openmsx_thread_main()'s own comment,
+    // "tears down SDL video for a fresh restart"), so this call happens
+    // fresh on every start, not just the process's first one.
+    SDL_InitSubSystem(SDL_INIT_VIDEO);
+
     g_omsx_thread = std::thread(openmsx_thread_main);
 
     std::unique_lock<std::mutex> lk(g_boot_mutex);
