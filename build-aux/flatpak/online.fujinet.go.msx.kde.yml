@@ -142,6 +142,13 @@ modules:
       - mkdir -p /app/lib
       - mv /app/lib64/* /app/lib/
       - rmdir /app/lib64
+      # glew.pc's own template declares "Requires: glu" unconditionally;
+      # openMSX calls no GLU function, and this runtime does not ship a
+      # glu.pc for pkg-config to resolve it against anyway (confirmed by a
+      # real failure here: "Package 'glu', required by 'glew', not
+      # found"). Strip the spurious requirement rather than add a whole
+      # unneeded GLU module just to satisfy it.
+      - sed -i '/^Requires:/d' glew.pc
       - install -Dm644 glew.pc /app/lib/pkgconfig/glew.pc
     sources:
       - type: archive
