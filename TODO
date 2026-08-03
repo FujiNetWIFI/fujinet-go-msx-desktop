@@ -228,24 +228,94 @@ Done (this pass) -- M2
       fixed via exactly this second check).
 
 
-Next -- M3
+Done (this pass) -- M3
+----------------------
+
+  * tools/fujinet/build-fujinet-desktop.sh + support/fujinet_desktop_
+    entry.cpp -- ported from CoCo (~95% target-independent, confirmed by
+    doing it): PC_TARGET=RS232 (fujinet-pc has no dedicated MSX target,
+    matching the Android sibling), BOIP forced to 65505 matching what M1's
+    patch-staged-tree.py already compiles into openMSX's own
+    FUJINET_DEFAULT_PORT, web UI default bind 64003. RS232 has no
+    BUILD_RS232/fnconfig.ini in the firmware tree (confirmed by reading
+    the source tree -- only autorun.img, unlike COCO's dedicated one), so
+    the build falls back to the generic dist config; force_boip_config()
+    stamps the correct BOIP port over it regardless either way, so this
+    is cosmetic (a possibly Atari-flavoured default host list) not a
+    functional gap. Worth fixing in a later pass if it turns out to
+    matter to users.
+  * core/src/paths.c + dynlib.h -- ported from CoCo, paths.c trimmed (no
+    ROM materialisation -- C-BIOS is bundled via openMSX's own share
+    tree, not per-app embedded blobs). Wired msxsession.h's
+    fujinet_runtime_src parameter through end to end -- it existed since
+    M2 but was never actually connected to anything; fixed while this
+    area was already being touched rather than leave known-dead API
+    surface.
+  * core/src/fujinet_runtime.c -- ported from CoCo with SAM speech-audio
+    mixing dropped entirely (RS232 has no Atari-hardware SAM equivalent,
+    and openMSX owns its own audio regardless). fujinet_wait_for_boip()
+    keeps CoCo's connect-probe design -- confirmed by reading
+    lib/hardware/BoIPChannel.cpp that it is a shared component between
+    the RS232 and COCO/DriveWire buses, so the same "suspends up to 2s
+    before listening" behaviour applies here too.
+  * core/src/session.c -- msxsession_start() starts FujiNet first and
+    waits for the BOIP listener before booting openMSX (same ordering as
+    CoCo); msxsession_stop() stops it after.
+  * core/tests/fujinet_smoke.c (new ctest) -- boots openMSX with FujiNet
+    enabled and confirms "BoIPChannel: connection from:" appears in the
+    FujiNet console log. Confirmed by reading
+    lib/hardware/BoIPChannel.cpp's accept_connection(): this line is
+    logged by the *listener* side on accept, so it is genuine proof
+    openMSX's FujiNet device connected in, not just that something
+    answered a probe. Exits 77 (ctest SKIP) when FujiNet isn't running,
+    matching boot_smoke's ROM-less-build skip shape.
+
+  CORRECTED from the original M3 plan: the BOIP connection does not wait
+  for the 'c' keypress at all -- openMSX's FujiNet device connects out as
+  soon as the FujiNet extension is inserted at boot, before C-BIOS's boot
+  menu is even up. fujinet_smoke still injects 'c' as a closer-to-real-
+  usage check, but the connection it actually looks for in the log
+  happens earlier and is not gated on it.
+
+  A SECOND real bug caught by the clean-clone gate test in this same
+  milestone (see the fix commit after M3's main one): core/CMakeLists.txt
+  gated fujinet_smoke's registration on `if(WITH_FUJINET)`, but that
+  option is declared inside cmake/FujiNetRuntime.cmake, which the
+  top-level CMakeLists.txt includes *after* add_subdirectory(core) --
+  so the variable did not exist yet at that point and read as
+  unset/false, silently skipping the test's registration even on a
+  WITH_FUJINET=ON build. The FujiNet runtime itself still built
+  successfully (FujiNetRuntime.cmake's own option() call ran later in the
+  same pass and defaulted on), so nothing about the build looked broken;
+  ctest just quietly ran two tests instead of three. CoCo's sibling
+  avoids this whole class of bug by never gating its own FujiNet-
+  dependent test (drivewire_smoke) on WITH_FUJINET at all -- fixed the
+  same way: register unconditionally, skip (77) at runtime instead. This
+  is now the SECOND time in this repo's history that the clean-clone gate
+  test (not a plain in-place rebuild) caught a real bug M1 and M2's own
+  "it works" verification had missed -- worth remembering as a reason to
+  keep running it every milestone, not just early on.
+
+  VERIFIED end to end, including after the WITH_FUJINET fix: all three
+  ctest cases pass, both from a rebuild in place and from a genuine fresh
+  `git clone --local` with no *_SRC overrides. fujinet_smoke's own run
+  shows the real sequence -- FujiNet listens on 127.0.0.1:65505, openMSX's
+  FujiNet device connects in immediately at extension-boot time,
+  "BoIPChannel: connection from: 127.0.0.1" logged, clean shutdown, exit 0.
+
+
+Next -- M4
 ----------
 
-FujiNet in-process: tools/fujinet/build-fujinet-desktop.sh ported from
-coco (~95% target-independent per PORTING.md), PC_TARGET=RS232, BoIP
-65505, web UI 64003. THE LONG POLE per the original milestone plan.
-Gate: press 'c' from C-BIOS, FujiNet CONFIG screen shows a populated
-host list; ss -tnp shows one ESTABLISHED pair on 65505.
+Settings store, media import (.dsk/.rom/.cas -> SD folder, carts -> cart
+dir), Import System ROMs (turboR/real-machine), machine profile switching
+(MSX/MSX2/MSX2+/turboR) with clean restart, joystick binding driven
+through openMSX Tcl (plug joyporta msxjoystick1, joystick1_config) via
+the command queue.
 
 
-Then, in order (M4 through M9)
+Then, in order (M5 through M9)
 -------------------------------
-
-  M4  Settings store, media import (.dsk/.rom/.cas -> SD folder, carts ->
-      cart dir), Import System ROMs (turboR/real-machine), machine profile
-      switching (MSX/MSX2/MSX2+/turboR) with clean restart, joystick
-      binding driven through openMSX Tcl (plug joyporta msxjoystick1,
-      joystick1_config) via the command queue.
 
   M5  KDE frontend (Qt6 Widgets). Doing this early is what keeps the core
       honest about staying toolkit-agnostic.
