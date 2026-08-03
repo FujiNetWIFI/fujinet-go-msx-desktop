@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>online.fujinet.go.msx.kde</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>FujiNet Go MSX</name>
+  <summary>Self-contained MSX / MSX2 / MSX2+ with built-in FujiNet</summary>
+  <description>
+    <p>
+      An MSX, MSX2 or MSX2+ with FujiNet built in: mount disk images from
+      TNFS servers or the local SD folder, configure everything through the
+      embedded FujiNet web UI, and boot straight into FujiNet's CONFIG
+      screen. C-BIOS is bundled, so every machine boots with no manufacturer
+      firmware required.
+    </p>
+    <p>
+      Emulation is provided by openMSX, with FujiNet attached over its own
+      cartridge device on loopback TCP. The debugger understands all three
+      video chips this family of machines shipped with -- the MSX1 TMS9918A
+      and the MSX2/MSX2+ V9938/V9958 -- including their register sets,
+      command engine, and palette RAM.
+    </p>
+  </description>
+  <launchable type="desktop-id">online.fujinet.go.msx.kde.desktop</launchable>
+  <!-- Software centres classify from these, not from the .desktop
+       Categories= line; without them the app lands in no section at all. -->
+  <categories>
+    <category>Game</category>
+    <category>Emulator</category>
+  </categories>
+  <url type="homepage">https://fujinet.online/</url>
+  <url type="bugtracker">https://github.com/FujiNetWIFI/fujinet-go-msx-desktop/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <caption>FujiNet CONFIG running on the emulated MSX2</caption>
+      <image>https://raw.githubusercontent.com/FujiNetWIFI/fujinet-go-msx-desktop/main/data/screenshots/1_fujinet_config.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>The built-in Z80 + V9938/V9958 VDP debugger</caption>
+      <image>https://raw.githubusercontent.com/FujiNetWIFI/fujinet-go-msx-desktop/main/data/screenshots/2_debugger.png</image>
+    </screenshot>
+  </screenshots>
+  <developer id="online.fujinet">
+    <name>Thomas Cherryhomes</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-08-03">
+      <description>
+        <p>
+          First release of the MSX desktop app: a headless openMSX core
+          driving MSX/MSX2/MSX2+ with C-BIOS bundled, FujiNet built in and
+          joined over its own cartridge device, and a debugger covering the
+          Z80 CPU and the full TMS9918A/V9938/V9958 VDP family.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

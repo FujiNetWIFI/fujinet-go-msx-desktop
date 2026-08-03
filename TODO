@@ -738,15 +738,63 @@ specific gap a single Linux dev machine cannot see on its own:
   verification is flatpak.yml's own first CI run on a normal GitHub
   Actions runner.
 
-Then, in order (M8-M9)
------------------------
+Done (this pass) -- M8
+----------------------
 
-  M8  Icons (tools/icons/make-icons.py against fujinet-go-msx's launcher
-      art), desktop entries, AppStream metainfo, CPack DEB/RPM/TGZ,
-      build-aux/windows/installer.nsi.
+  * data/icons/src/fujinet-go-msx-foreground.png -- copied verbatim from
+    fujinet-go-msx (Android)'s ic_launcher_adaptive_fore.png (confirmed
+    byte-identical between the app's own res/ and the shared ic_launcher/
+    source tree via md5sum, so either copy is equally authoritative).
+  * tools/icons/make-icons.py -- ported from the CoCo sibling, MSX's own
+    brand background colour (#0000FF, from the Android app's colors.xml
+    ic_launcher_background) composited under the foreground into a rounded
+    square, rendered at every hicolor size plus a macOS .icns (all sizes
+    the icns TOC references, via Pillow -- no iconutil needed, works on
+    any host OS). Run once; data/icons/hicolor/... and
+    data/icons/fujinet-go-msx.icns are committed so building needs no
+    image tooling.
+  * frontends/{gnome,kde}/data/online.fujinet.go.msx.{gnome,kde}.desktop +
+    .metainfo.xml -- both validated clean with desktop-file-validate and
+    `appstreamcli validate --no-net --pedantic` (one informational-only
+    note on both metainfo files: "cid-maybe-not-rdns", the same one the
+    CoCo/ADAM/Apple II sibling ids all get, not a real problem). Both
+    frontend CMakeLists.txt now install these (application/metainfo
+    datadirs) and register desktop_entry_*/metainfo_* ctest cases that
+    re-validate them on every build -- 4 new tests, 12 total.
+  * data/screenshots/{1_fujinet_config,2_debugger}.png -- REAL captures
+    from a live run (not mockups): grim against the session's Wayland
+    compositor (DISPLAY=:1 is Xwayland; ImageMagick's `import -window
+    root` failed in this environment for reasons not chased down, grim
+    against the underlying wayland-1 socket worked directly), cropped to
+    the app window. The first shows FujiNet CONFIG on a freshly booted
+    C-BIOS MSX2 (proving the boot-to-CONFIG path actually renders
+    correctly, not just that the window opens); the second shows the
+    debugger's VDP tab (MSX_OPEN_DEBUGGER=1 MSX_DEBUGGER_TAB=vdp) with a
+    real decoded nametable, host list text, and palette swatches --
+    genuine proof the M6 VDP debugger renders real content, not just that
+    it compiles.
+  * CPack (CMakeLists.txt, already scaffolded at M0 anticipating this
+    milestone) -- verified for real: `cpack -G TGZ` (DEB/RPM tools are not
+    installed on this dev machine, so those two generators are configured
+    but unexercised locally) produced a real archive, inspected with
+    `tar tzf`: binaries, libfujinet.so, the full C-BIOS+openMSX share tree,
+    both frontends' icons at every hicolor size under their own app ids,
+    and both metainfo.xml files, all landing at the expected
+    ${CMAKE_INSTALL_PREFIX}-relative paths.
+
+  NOT done in this pass: build-aux/windows/installer.nsi (NSIS needs the
+  Windows frontend to exist first -- that is M9, not M8; packaging a
+  frontend that is not built yet would be premature).
+
+  VERIFIED end to end: 12/12 ctest cases pass (the 8 from M1-M7 plus the 4
+  new desktop-entry/metainfo validation tests), and a real `cpack -G TGZ`
+  archive was built and its contents inspected directly.
+
+Then, in order (M9)
+--------------------
 
   M9  macOS (AppKit) + Windows (Win32) frontends and their debugger
-      windows, release.yml, v0.1.0.
+      windows, build-aux/windows/installer.nsi, release.yml, v0.1.0.
 
 
 Known issues / things to remember

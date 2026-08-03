@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=FujiNet Go MSX
+GenericName=MSX with FujiNet
+Comment=Self-contained MSX / MSX2 / MSX2+ with built-in FujiNet
+Exec=fujinet-go-msx-kde
+Icon=online.fujinet.go.msx.kde
+Terminal=false
+Categories=Game;Emulator;
+Keywords=msx;msx2;msx2plus;openmsx;fujinet;emulator;z80;
+StartupNotify=true

@@ -49,3 +49,20 @@ if(WITH_WEBVIEW)
 endif()
 
 install(TARGETS fujinet-go-msx-kde RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES data/${KDE_APP_ID}.desktop
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(FILES data/${KDE_APP_ID}.metainfo.xml
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/metainfo)
+
+find_program(DESKTOP_FILE_VALIDATE desktop-file-validate)
+if(DESKTOP_FILE_VALIDATE)
+  add_test(NAME desktop_entry_kde
+           COMMAND ${DESKTOP_FILE_VALIDATE}
+                   "${CMAKE_CURRENT_SOURCE_DIR}/data/${KDE_APP_ID}.desktop")
+endif()
+find_program(APPSTREAMCLI appstreamcli)
+if(APPSTREAMCLI)
+  add_test(NAME metainfo_kde
+           COMMAND ${APPSTREAMCLI} validate --no-net --pedantic
+                   "${CMAKE_CURRENT_SOURCE_DIR}/data/${KDE_APP_ID}.metainfo.xml")
+endif()
