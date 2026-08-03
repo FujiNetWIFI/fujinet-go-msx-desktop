@@ -39,6 +39,78 @@ sibling and a standalone fujinet-pc-msx already use):
   Web UI:                                                         64003
 
 
+Done (this pass) -- M0, M1
+--------------------------
+
+M1
+  * cmake/Dependencies.cmake -- msx_provide_dependency(), ported from
+    CoCo's coco_provide_dependency() and simplified: openMSX and
+    fujinet-firmware are both live git forks with real history (unlike
+    CoCo's XRoar tarball), so both resolve via the SRC-override / clone-at-
+    pin path, with no .gitmodules registration (matches what CoCo's
+    third_party/ actually does at runtime, despite its own comment saying
+    "submodule" -- there is no .gitmodules there either). openMSX pinned at
+    b11b550120fe9d342f9bd64128de7bd06e1a7758 (feat/fujinet), fujinet-firmware
+    at b9a27cfa145134f5a7088535ac2721eb3cdf41be.
+  * cmake/StageOpenMSX.cmake -- stages src/, build/, share/ and
+    Contrib/cbios into core/openmsx-generated/, then runs
+    tools/openmsx/patches/patch-staged-tree.py. Re-stages on source or
+    patch-script change, or -DOPENMSX_RESTAGE=ON.
+  * tools/openmsx/patches/patch-staged-tree.py -- two patches, both
+    anchor-verified and confirmed idempotent by running twice against the
+    real checkout:
+      - src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505.
+      - src/video/PostProcessor.cc: a msxhost_notify_frame(paintFrame) call
+        inserted in rotateFrames(), right beside openMSX's own AVI-recorder
+        tap (proof this is the right per-frame CPU-side hook point) --
+        forward-declares FrameSource and the extern "C" hook once, near the
+        top of the file.
+  * cmake/OpenMSXRuntime.cmake + tools/openmsx/build-openmsx-desktop.sh --
+    drives openMSX's own GNUmakefile over the staged+patched tree via bash
+    (never a bare .sh), tolerates the expected final-executable-link
+    failure (msxhost_notify_frame is undefined until M2 supplies it, same
+    as the Android sibling tolerates its own link failure for a different
+    reason), archives every object except main.o into libopenmsx.a, and
+    writes include-dirs.txt from a `find src -type d` that mirrors
+    openMSX's own SOURCE_DIRS logic (build/main.mk:260) so a future
+    openMSX version adding a subdirectory doesn't silently break the
+    include path. Linux links system Tcl/SDL2/freetype/etc dynamically
+    (LINK_MODE=SYS_DYN, the default); darwin/mingw-w64 will additionally
+    run `make 3rdparty` first for static linking (untested so far -- no
+    Mac/Windows box; M7/M9 concern).
+  * cmake/toolchains/mingw-w64.cmake -- ported from CoCo, scoped to
+    cross-compiling the *session/frontend* C/C++ code, not openMSX itself
+    (which needs a real MSYS2/UCRT64 shell for its own 3rdparty chain --
+    windows.yml in CI builds natively, matching the family convention).
+  * cmake/FujiNetRuntime.cmake -- ported verbatim from CoCo (renamed),
+    unexercised until M3 (WITH_FUJINET=OFF so far).
+  * CMakeLists.txt, core/CMakeLists.txt -- skeleton; core/tests/
+    openmsx_link_test.cpp links openmsx-lib and calls the real
+    openmsx::Version::full() (deliberately not just an empty translation
+    unit against the headers, so a link-only build tells the real story).
+
+  VERIFIED end to end, twice:
+    1. Against the local OPENMSX_SRC=~/Workspace/openMSX checkout:
+       staged, patched (both patches applied and confirmed idempotent),
+       571 objects compiled, archived into libopenmsx.a, our own
+       openmsx_link_test linked and ran ("openMSX 21.0-unknown" -- the
+       "unknown" is expected, the staged tree has no .git metadata, same
+       known condition PORTING.md documents for FujiNet's
+       version_common.py -- not a defect here).
+    2. The actual clean-clone gate: a fresh `git clone --local` of this
+       repository (no OPENMSX_SRC override), submodule-init step failing
+       gracefully as expected (no .gitmodules) and falling through to the
+       clone-at-pin path, which checked out EXACTLY
+       b11b550120fe9d342f9bd64128de7bd06e1a7758 (confirmed with git
+       rev-parse), then staged/patched/compiled/archived/linked
+       identically to run 1. (The clone was pointed at the local openMSX
+       checkout's path rather than GitHub, purely to avoid a slow network
+       fetch of the real ~580MB history during verification -- the code
+       path exercised, and the pin match confirmed, are the real thing;
+       only the URL was swapped for speed, and only in a throwaway
+       scratch clone, never committed.)
+
+
 Done (this pass) -- M0
 -----------------------
 
@@ -71,52 +143,46 @@ Done (this pass) -- M0
     maintainer says otherwise.
 
 
-Next -- M1
+Next -- M2
 ----------
 
-  cmake/Dependencies.cmake
-    msx_provide_dependency() ported from coco's coco_provide_dependency()
-    (SRC override / third_party/ submodule / pinned-commit clone fallback),
-    renamed. Two dependencies:
-      openMSX            FujiNetWIFI/openMSX, branch feat/fujinet,
-                          pin b11b55012 -- submodule, since (unlike XRoar)
-                          it's a live git fork, not a tarball.
-      fujinet-firmware    FujiNetWIFI/fujinet-firmware, pin b9a27cfa1.
+  core/openmsx/msx_host.{cc,hh}
+    Ported from the Android sibling's msx_host.cpp: Reactor boot
+    (-machine <profile> -ext FujiNet, powerOn, run on its own thread),
+    headless GL context (SDL_VIDEODRIVER=offscreen on Linux; a hidden
+    SDL_WINDOW_HIDDEN|SDL_WINDOW_OPENGL window on macOS/Windows -- both
+    untested so far), and msxhost_notify_frame() -- the function
+    PostProcessor.cc's patched rotateFrames() now calls every frame (see
+    M1) -- packing the FrameSource into XRGB8888 via
+    getLinePtr320_240()/getLinePtr640_480(), the same API PostProcessor's
+    own getScaledFrame() helper uses. Abort the boot before powerOn() if
+    renderer init failed (VDP::reset() derefs a null renderer otherwise).
 
-  cmake/StageOpenMSX.cmake
-    Stages third_party/openmsx (or OPENMSX_SRC) into
-    core/openmsx-generated/ with a .source-info marker (source commit +
-    the patch-script hash, so it re-stages when either changes, and
-    -DOPENMSX_RESTAGE=ON forces it -- same shape as StageXRoar.cmake).
-    Applies the three patches from COMPLIANCE.md via a Python staging
-    script (idempotent, anchored to exact text, hard-fail on missing
-    anchor -- same discipline as tools/xroar/patch-staged-tree.py).
+  core/src/session.c + core/include/msxsession.h
+    Thread lifecycle, the cross-thread command queue (machine switch,
+    reset, plug/unplug, snapshot reads -- everything the UI wants from
+    openMSX, drained on the openMSX thread once per frame from the frame
+    hook). NOT a phase-locked pacer -- openMSX paces itself
+    (`throttle on`, `fullspeedwhenloading off` so FujiNet's "loading"
+    hold doesn't race emulated time). msxsession_notify_vsync() stays in
+    the header for frontend compatibility but is advisory only
+    (MSX_PACE_LOG=1 diagnostic, nothing else). msxsession_render_audio()
+    returns 0 -- openMSX owns its own SDL2 Mixer audio, this app links no
+    SDL3 at all (confirmed: core/src/audio_sdl.c and gamepad_sdl.c from
+    the sibling repos are NOT ported).
 
-  tools/openmsx/build-openmsx-desktop.sh
-    Invoked through bash by name (never as a bare .sh -- MSYS2 cmake
-    cannot execute_process() a script). Drives openMSX's own GNUmakefile:
-    OPENMSX_TARGET_OS=linux first (macOS/mingw-w64 come in M7-M9), builds
-    the 3rdparty target when the platform needs static libs, then compiles
-    src/ into obj/*.o and archives everything except main.o into
-    libopenmsx.a -- same object-harvesting shape as the Android sibling's
-    build-openmsx-core.sh (derived/<cpu>-<os>-opt[-3rd]/obj).
+  GNOME frontend, WITH_FUJINET=OFF.
 
-  Milestone gate: libopenmsx.a links against a trivial test executable on
-  Linux, from a clean clone with no OPENMSX_SRC override (submodule init
-  only). This is the clone-and-build promise holding from day one, per
-  PORTING.md.
+  Gate: C-BIOS MSX2 reaches the boot screen, keyboard works, and (unlike
+  M1) openMSX's own executable link now succeeds too -- msxhost_notify_frame
+  is finally defined, so build-openmsx-desktop.sh's tolerated-failure branch
+  should stop triggering. Confirm that before considering this milestone
+  closed: if the tolerated-link-failure branch still fires after M2, that
+  is a real regression, not the expected M1 condition.
 
 
-Then, in order (M2 through M9)
+Then, in order (M3 through M9)
 -------------------------------
-
-  M2  core/openmsx/msx_host.{cc,hh} (ported from the Android sibling's
-      msx_host.cpp: Reactor boot, -machine <profile> -ext FujiNet, the
-      rotateFrames() frame hook, headless GL via SDL_VIDEODRIVER=offscreen
-      on Linux / a hidden GL window on macOS+Windows) + core/src/session.c
-      (thread lifecycle, the cross-thread command queue, NOT a phase-locked
-      pacer -- openMSX paces itself) + the GNOME frontend, WITH_FUJINET=OFF.
-      Gate: C-BIOS MSX2 reaches the boot screen, keyboard works.
 
   M3  FujiNet in-process: tools/fujinet/build-fujinet-desktop.sh ported
       from coco (~95% target-independent per PORTING.md), PC_TARGET=RS232,
