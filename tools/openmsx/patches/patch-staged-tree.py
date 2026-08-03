@@ -825,6 +825,29 @@ def patch_pkgconfig_glib_bool_identifier(stage_dir: str) -> None:
         "\tsed -i.bak \\\n"
         "\t\t-e 's/_wstat (wfilename, buf);/_wstat (wfilename, (struct _stat64i32 *) buf);/' \\\n"
         "\t\t$(PWD)/$(<D)/glib/glib/gstdio.c\n"
+        "\t# Fourth distinct bug, in glib/gthread-win32.c: two of this\n"
+        "\t# file's four InterlockedCompareExchangePointer() call sites pass\n"
+        "\t# a specifically-typed pointer's address (GPrivateDestructor *\n"
+        "\t# volatile * and GThreadXpCONDITION_VARIABLE * volatile *) where\n"
+        "\t# mingw-w64's own headers declare the first parameter as plain\n"
+        "\t# `void * volatile *` -- the other two call sites in this same\n"
+        "\t# file (mutex->p, key->p) already pass an already-gpointer-typed\n"
+        "\t# field's address and were never reported as errors by real CI,\n"
+        "\t# so only these two need the same explicit (void **) cast\n"
+        "\t# pattern already used twice above for a different type-tag\n"
+        "\t# mismatch. Confirmed against the real x86_64-w64-mingw32-gcc\n"
+        "\t# 16.1.0 headers (same version windows.yml uses): without the\n"
+        "\t# cast, a minimal reproduction using the exact declared types\n"
+        "\t# reproduces real CI's \"expected 'void * volatile*' but argument\n"
+        "\t# is of type 'GPrivateDestructor * volatile*'\" character for\n"
+        "\t# character; with it, zero warnings under\n"
+        "\t# -Werror=incompatible-pointer-types.\n"
+        "\tsed -i.bak \\\n"
+        "\t\t-e 's/InterlockedCompareExchangePointer (&g_private_destructors,/"
+        "InterlockedCompareExchangePointer ((void **) \\&g_private_destructors,/' \\\n"
+        "\t\t-e 's/InterlockedCompareExchangePointer (cond, result, NULL)/"
+        "InterlockedCompareExchangePointer ((void **) cond, result, NULL)/' \\\n"
+        "\t\t$(PWD)/$(<D)/glib/glib/gthread-win32.c\n"
         "\tcd $(@D) && $(PWD)/$(<D)/configure \\\n")
     if old not in text:
         fail(f"{path}: pkg-config configure-recipe anchor not found "
@@ -833,7 +856,8 @@ def patch_pkgconfig_glib_bool_identifier(stage_dir: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     print(f"Patched {path}: fixed pkg-config/glib's `bool` identifier, "
-          "G_GSIZE_FORMAT and _wstat64i32 struct-tag mismatch before "
+          "G_GSIZE_FORMAT, _wstat64i32 struct-tag mismatch and "
+          "InterlockedCompareExchangePointer type mismatches before "
           "configure runs")
 
 
