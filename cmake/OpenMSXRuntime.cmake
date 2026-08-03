@@ -159,6 +159,22 @@ if(UNIX AND NOT APPLE)
                         "needs libtcl8.6 or libtcl; no pkg-config module "
                         "exists for it, so this is a plain find_library).")
   endif()
+  # tcl.h's directory, separately from the library above: this dev machine's
+  # tcl.h happens to sit straight in /usr/include (already on every
+  # compiler's default search path, so this went unnoticed for a while), but
+  # that is not guaranteed -- Debian/Ubuntu's tcl-dev package installs it
+  # under a versioned .../tcl8.6/tcl.h subdirectory instead, and a flatpak
+  # module's own /app/include is never on the default path at all. Search
+  # explicitly (PATH_SUFFIXES covers the versioned-subdirectory case; the
+  # unversioned case still matches because find_path also tries the bare
+  # directory) rather than continue relying on luck.
+  find_path(OPENMSX_TCL_INCLUDE_DIR NAMES tcl.h PATH_SUFFIXES tcl8.6 tcl)
+  if(NOT OPENMSX_TCL_INCLUDE_DIR)
+    message(FATAL_ERROR "tcl.h not found (checked plain include dirs and "
+                        "their tcl8.6/tcl subdirectories).")
+  endif()
   set_property(TARGET openmsx-lib APPEND PROPERTY
     INTERFACE_LINK_LIBRARIES PkgConfig::OPENMSX_SYS_DEPS "${OPENMSX_TCL_LIBRARY}")
+  set_property(TARGET openmsx-lib APPEND PROPERTY
+    INTERFACE_INCLUDE_DIRECTORIES "${OPENMSX_TCL_INCLUDE_DIR}")
 endif()
