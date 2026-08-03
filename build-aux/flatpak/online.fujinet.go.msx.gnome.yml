@@ -66,6 +66,22 @@ modules:
         url: https://prdownloads.sourceforge.net/tcl/tcl8.6.14-src.tar.gz
         sha256: 5880225babf7954c58d4fb0f5cf6279104ce1cd6aa9b71e9a6322540e1c4de66
 
+  # post-install symlinks: SDL2's (and SDL2_ttf's) own install rule puts
+  # every header under an SDL2/ subdirectory -- upstream's own deliberate,
+  # long-standing convention, matched here by both the autotools and CMake
+  # build systems. openMSX's own Makefile-driven build compiles
+  # #include <SDL.h> / <SDL_ttf.h> with no SDL2/ prefix, relying on its own
+  # pkg-config-derived -I flags to already point straight at the SDL2/
+  # subdirectory -- which held for the system-installed case this project
+  # is normally developed against, but not reliably for these from-source
+  # modules' own generated .pc Cflags (confirmed by a real failure here:
+  # TTFFont.cc's "SDL_ttf.h: No such file or directory", surfacing only as
+  # a downstream link error -- "undefined reference to
+  # openmsx::TTFFont::~TTFFont()" -- since openMSX's own build tolerates
+  # individual compile failures). Symlinking every header flat into
+  # /app/include directly works regardless of exactly which -I flags any
+  # given consumer ends up with, since /app/include itself is always on
+  # the search path.
   - name: sdl2
     buildsystem: cmake-ninja
     builddir: true
@@ -74,6 +90,8 @@ modules:
       - -DSDL_SHARED=ON
       - -DSDL_STATIC=OFF
       - -DSDL_TEST=OFF
+    post-install:
+      - for f in /app/include/SDL2/*.h; do ln -sf "$f" /app/include/; done
     sources:
       - type: archive
         url: https://github.com/libsdl-org/SDL/releases/download/release-2.32.6/SDL2-2.32.6.tar.gz
@@ -87,6 +105,8 @@ modules:
       - -DSDL2TTF_HARFBUZZ=OFF
       - -DSDL2TTF_VENDORED=OFF
       - -DBUILD_SHARED_LIBS=ON
+    post-install:
+      - for f in /app/include/SDL2/*.h; do ln -sf "$f" /app/include/; done
     sources:
       - type: archive
         url: https://github.com/libsdl-org/SDL_ttf/releases/download/release-2.24.0/SDL2_ttf-2.24.0.tar.gz
