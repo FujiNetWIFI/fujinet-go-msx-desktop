@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Ten patches:
+Eleven patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -240,6 +240,39 @@ an on-screen keyboard's synthetic back-to-back press+release.
     install to inherit it from) globally rather than leaving it to keep
     silently degrading to fragile *-config-script fallbacks everywhere
     it happens to still work.
+
+11. build/libraries.py: _get_pkg_config()'s cross-pkg-config filename match
+    widened to also accept a .exe suffix. A real Windows CI run got past
+    every bug above -- the 3rdparty chain now finishes completely, and
+    both "checking for sdl2 >= 2.0.10... yes" and "checking for freetype2
+    >= 7.0.1... yes" confirm patch 10 above actually works -- and
+    progressed into an entirely different phase of openMSX's own build:
+    the main (non-3rdparty) build's own library-probing step
+    (build/probe.py), which crashed with "RuntimeError: No cross-pkg-config
+    found in 3rdparty build" raised by _get_pkg_config() in this file.
+
+    That function lists $(3rdparty install dir)/../tools/bin (where
+    patch 9's own analysis already established pkg-config gets installed)
+    and looks for a filename ending in '-pkg-config' -- but the real
+    installed file on Windows is 'x86_64-w64-mingw32-pkg-config.exe', not
+    the extension-less name this check assumes. Confirmed directly from
+    pkg-config's own upstream build files (the same pinned
+    pkg-config-0.29.2.tar.gz patch 9 already downloads to verify its own
+    fix): Makefile.am defines `host_tool = $(host)-pkg-config$(EXEEXT)`,
+    and $(EXEEXT) is '.exe' for a mingw32 target -- not inferred, read
+    directly from the real source. This didn't break patch 9's own fix
+    (PKG_CONFIG_PATH lets shell commands invoke the binary by its
+    extension-less name -- Windows' CreateProcess/PATHEXT resolves that to
+    the real .exe automatically) because that's ordinary process
+    execution, which auto-appends .exe when the bare name doesn't
+    literally exist; this function instead does a plain directory listing
+    and textual filename comparison, which has no such fallback.
+
+    Widened to `name.endswith('-pkg-config') or name.endswith(
+    '-pkg-config.exe')` rather than stripping a trailing extension before
+    comparing, so the returned path is still the exact real filename on
+    disk either way (no behavior change on Linux/macOS, where the
+    extension-less form is already correct).
 """
 import sys
 
@@ -923,6 +956,34 @@ def patch_pkgconfig_path_export(stage_dir: str) -> None:
     print(f"Patched {path}: exported PKG_CONFIG_PATH for the 3rdparty chain")
 
 
+def patch_cross_pkgconfig_exe_suffix(stage_dir: str) -> None:
+    path = f"{stage_dir}/build/libraries.py"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "-pkg-config.exe"
+    if marker in text:
+        return  # already patched
+    old = "\t\t\tif name.endswith('-pkg-config'):\n"
+    new = (
+        "\t\t\t# FujiNet Go MSX (desktop): see patch-staged-tree.py -- the\n"
+        "\t\t\t# real installed filename on Windows is 'x86_64-w64-mingw32-\n"
+        "\t\t\t# pkg-config.exe' (confirmed directly from pkg-config's own\n"
+        "\t\t\t# Makefile.am: `host_tool = $(host)-pkg-config$(EXEEXT)`),\n"
+        "\t\t\t# not the extension-less name this check originally assumed\n"
+        "\t\t\t# -- a real Windows CI run raised the RuntimeError below\n"
+        "\t\t\t# despite the file genuinely being right there.\n"
+        f"\t\t\tif name.endswith('-pkg-config') or name.endswith('{marker}'):\n"
+    )
+    if old not in text:
+        fail(f"{path}: _get_pkg_config() filename-match anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: _get_pkg_config() now matches a .exe-suffixed "
+          "cross-pkg-config too")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -937,6 +998,7 @@ def main() -> None:
     patch_darwin_blocks_flag(stage_dir)
     patch_pkgconfig_glib_bool_identifier(stage_dir)
     patch_pkgconfig_path_export(stage_dir)
+    patch_cross_pkgconfig_exe_suffix(stage_dir)
 
 
 if __name__ == "__main__":
