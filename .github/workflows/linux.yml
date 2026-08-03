@@ -1,0 +1,48 @@
+name: Linux
+
+# First of the M7 CI jobs (see TODO): Linux only for now, macOS and Windows
+# to follow once those frontends exist (M9) or their toolchains are proven
+# out. Builds both existing frontends (GNOME, KDE) and runs the full ctest
+# suite, including the M6 debugger/VDP tests against a real headless
+# C-BIOS boot (SDL_VIDEODRIVER=offscreen -- no display needed, see
+# core/openmsx/msx_host.hh).
+#
+# Unlike the sibling repos this needs no separate SDL3 build: openMSX links
+# system SDL2 dynamically on Linux (cmake/OpenMSXRuntime.cmake), so an apt
+# package is enough. No WITH_*_ROMS=OFF flag either -- C-BIOS is bundled
+# unconditionally (see COMPLIANCE.md), so this is the one FujiNet Go target
+# whose CI boots real firmware rather than skipping ROM-gated tests.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools, openMSX's own dependencies, and frontend toolkits
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build python3 pkg-config git \
+            tcl-dev libsdl2-dev libsdl2-ttf-dev libpng-dev libogg-dev \
+            libvorbis-dev libtheora-dev libglew-dev zlib1g-dev \
+            libfreetype-dev libgl-dev libasound2-dev \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
+            qt6-base-dev libqt6opengl6-dev qt6-webengine-dev \
+            desktop-file-utils appstream
+
+      - name: Configure
+        run: cmake -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure

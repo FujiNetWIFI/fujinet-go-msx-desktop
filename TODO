@@ -616,15 +616,55 @@ debugging session leans on most -- is complete for V9918/V9938/V9958
 alike.
 
 
-Then, in order (M7 through M9)
--------------------------------
+In progress -- M7
+-----------------
 
-  M7  CI: linux.yml first (nm -D libfujinet.so), then macos.yml (otool -L
-      every Mach-O, fail on /opt/homebrew or /usr/local) and windows.yml
-      (objdump -p import table, NOT ldd), then flatpak.yml (tcl, sdl2,
-      sdl2_ttf, freetype, libpng, glew added as declared modules -- no
-      network during the sandboxed build, so anything undeclared is
-      simply absent).
+CI workflows. Order per the plan: linux.yml first, then macos.yml and
+windows.yml, then flatpak.yml.
+
+  * .github/workflows/linux.yml -- installs openMSX's own Linux
+    dependency list (tcl-dev, libsdl2-dev, libsdl2-ttf-dev, libpng-dev,
+    libogg/vorbis/theora-dev, libglew-dev, zlib1g-dev, libfreetype-dev,
+    libgl-dev, libasound2-dev -- matching README.md's documented list and
+    cmake/OpenMSXRuntime.cmake's real `ldd` cross-check) plus GTK4/
+    libadwaita and Qt6 for the two existing frontends, then a plain
+    configure/build/ctest. No WITH_*_ROMS=OFF flag needed, unlike the
+    sibling repos' linux.yml -- C-BIOS is bundled unconditionally (see
+    COMPLIANCE.md), so this is the one FujiNet Go target whose CI boots
+    real firmware rather than skipping ROM-gated tests. The package list
+    and build flow are the same ones exercised, repeatedly, by every
+    from-scratch local rebuild this session already ran -- the highest-
+    confidence of the three OS workflows.
+  * .github/workflows/macos.yml, windows.yml -- written from the CoCo
+    sibling's structure, adapted for openMSX's own static-3rdparty build
+    chain (NEED_3RDPARTY in tools/openmsx/build-openmsx-desktop.sh,
+    triggered by OPENMSX_TARGET_OS=darwin/mingw-w64) rather than a
+    separate pinned-SDL3 build step. EXPLICITLY UNVERIFIED: there is no
+    Mac or Windows machine in this development environment, so neither
+    openMSX's darwin/mingw-w64 3rd-party chain nor msx_host.cc's
+    SDL_VIDEODRIVER=offscreen headless-GL hint (used unconditionally,
+    on every platform -- no macOS/Windows-specific branch was written,
+    since "offscreen" is a portable SDL2 driver rather than an X11/EGL-
+    specific one, and adding an unverifiable speculative branch seemed
+    worse than flagging the untested case honestly) has ever actually
+    run outside Linux. These two workflow files are a best-effort
+    starting point; a real run on push is what actually tests them, same
+    as M1's own "darwin/mingw-w64 will additionally run `make 3rdparty`
+    first -- untested so far" note has said since the very first
+    milestone.
+
+  NOT yet done in M7: flatpak.yml, and the build-aux/flatpak/online.
+  fujinet.go.msx.{gnome,kde}.yml manifests it depends on (which do not
+  exist yet -- unlike the CI workflows above, a flatpak manifest is a
+  from-scratch artifact needing every dependency module (tcl, sdl2,
+  sdl2_ttf, freetype, libpng, glew, libogg, libvorbis, libtheora, zlib,
+  plus FujiNet's own mbedtls/libssh/libsmb2/libnfs/expat/cjson) declared
+  with correct sources and hashes -- real, separate work, deliberately
+  not rushed alongside the three CI workflows above. Next concrete step
+  for M7.
+
+Then, in order (M8-M9)
+-----------------------
 
   M8  Icons (tools/icons/make-icons.py against fujinet-go-msx's launcher
       art), desktop entries, AppStream metainfo, CPack DEB/RPM/TGZ,

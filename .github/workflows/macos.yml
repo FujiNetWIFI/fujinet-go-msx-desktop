@@ -1,0 +1,52 @@
+name: macOS
+
+# Second of the M7 CI jobs (see TODO). Builds core + the GNOME/KDE
+# frontends (whichever toolkits Homebrew provides -- CMakeLists.txt's
+# find_package calls skip a frontend gracefully rather than failing when
+# its toolkit is absent) and runs the full ctest suite.
+#
+# UNVERIFIED as of this workflow's first commit: there is no Mac available
+# in this development environment (see TODO's "Known issues" section).
+# openMSX's own static 3rd-party chain (Tcl/SDL2/SDL2_ttf/freetype/libpng/
+# zlib/ogg/vorbis/theora/GLEW built from source -- NEED_3RDPARTY in
+# tools/openmsx/build-openmsx-desktop.sh, triggered by OPENMSX_TARGET_OS=
+# darwin, cmake/OpenMSXRuntime.cmake) has never actually been exercised on
+# a real Mac by this project; nor has msx_host.cc's SDL_VIDEODRIVER=
+# offscreen headless-GL hint been confirmed to work outside Linux (the
+# original design note assumed a separate hidden-window path might be
+# needed on macOS/Windows, but no such platform branch was ever written --
+# "offscreen" is a portable SDL2 video driver, not X11/EGL-specific, so the
+# same code path was left in place and just flagged untested here rather
+# than adding speculative, unverifiable branching). This workflow existing
+# and running (green or red) on the first real push is the actual test.
+#
+# Build tools only -- no brew-installed SDL2/Tcl/etc: unlike Linux, darwin
+# gets its 3rd-party stack from openMSX's own from-source chain (see
+# above), so the only thing this needs from Homebrew is the toolchain to
+# drive that chain (autoconf/automake/libtool cover the ./configure-based
+# pieces of it).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: brew install cmake ninja python3 pkg-config autoconf automake libtool
+
+      - name: Configure
+        run: cmake -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure

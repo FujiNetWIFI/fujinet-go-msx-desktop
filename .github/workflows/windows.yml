@@ -1,0 +1,67 @@
+name: Windows
+
+# Third of the M7 CI jobs (see TODO). Native MSYS2/UCRT64, matching how
+# tools/fujinet/build-fujinet-desktop.sh and tools/openmsx/build-openmsx-
+# desktop.sh already expect to be run (their cygpath/bash-by-name handling
+# is written for an MSYS2 shell). cmake/toolchains/mingw-w64.cmake exists
+# for cross-compiling the session/frontend code from Linux when no Windows
+# box is available for that; this workflow is the real thing once it runs
+# on a windows-latest runner.
+#
+# UNVERIFIED as of this workflow's first commit, same caveat as macos.yml:
+# no Windows machine in this development environment. OPENMSX_TARGET_OS=
+# mingw-w64 triggers the same NEED_3RDPARTY static-build chain as darwin
+# (cmake/OpenMSXRuntime.cmake, tools/openmsx/build-openmsx-desktop.sh) --
+# untested here for the same reason. The MSYS2 package list below is a
+# best-effort guess at what that chain's ./configure-based sub-builds need
+# (autotools + make + nasm, the last for some 3rd-party libs' asm-optimized
+# paths), not a list confirmed against a real run.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # autocrlf would rewrite every staged/patched openMSX/FujiNet
+          # source file's line endings on checkout, which is exactly the
+          # kind of diff-shaped noise cmake/StageOpenMSX.cmake's re-stage
+          # detection (content hashing of the patch scripts) is not
+          # expecting.
+          fetch-depth: 1
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            make
+            autoconf
+            automake
+            libtool
+            nasm
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-pkgconf
+
+      - name: Configure
+        run: cmake -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
