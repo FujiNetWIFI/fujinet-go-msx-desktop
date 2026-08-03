@@ -24,6 +24,10 @@
 
 #include <SDL.h>
 
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -454,8 +458,34 @@ int msxhost_core_start(void) {
     std::unique_lock<std::mutex> lk(g_boot_mutex);
     // Bounded so a wedged boot cannot hang the caller forever; 15s matches
     // the family's own start-handshake timeouts (e.g. cocosession_start).
+#ifdef __APPLE__
+    // A plain condition_variable wait here would never service the main
+    // thread's dispatch queue -- and VisibleSurface's window/GL-context
+    // creation (see patch-staged-tree.py) dispatch_syncs onto it from the
+    // openMSX thread just spawned above. Without this, both threads would
+    // deadlock: the openMSX thread stuck forever in dispatch_sync waiting
+    // for a block that never runs, this one stuck until the 15s timeout
+    // below gives up and permanently leaks the wedged openMSX thread (see
+    // the detach fallback right below). Poll in short slices instead,
+    // releasing g_boot_mutex and spinning the run loop briefly each time
+    // so a pending dispatch_sync block actually gets serviced -- the main
+    // dispatch queue is drained as a side effect of running the run loop,
+    // the standard Apple mechanism for this exact "background thread needs
+    // the main thread to do one AppKit thing right now" pattern.
+    {
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (g_boot_status == 0 &&
+              std::chrono::steady_clock::now() < deadline) {
+            lk.unlock();
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+            lk.lock();
+        }
+    }
+#else
     g_boot_cv.wait_for(lk, std::chrono::seconds(15),
                        [] { return g_boot_status != 0; });
+#endif
     if (g_boot_status != 1) {
         if (g_last_error.empty()) set_error("openMSX did not come up in time");
         if (g_omsx_thread.joinable()) {
@@ -478,9 +508,24 @@ void msxhost_core_stop(void) {
         g_reactor->getEventDistributor().distributeEvent(openmsx::QuitEvent());
     }
     if (g_omsx_thread.joinable()) {
+        // Reactor's own destructor runs on the openMSX thread once run()
+        // returns (see openmsx_thread_main()'s "delete reactor" at the end
+        // of a clean run), tearing down VisibleSurface's window and GL
+        // context along with it. Same reasoning as msxhost_core_start()'s
+        // own wait: on macOS this caller's thread must keep servicing the
+        // main dispatch queue while it waits, in case that teardown needs
+        // the main thread the same way construction did (see patch-
+        // staged-tree.py) -- a plain sleep loop here would not, and could
+        // deadlock the same way an unpatched boot wait would have.
+#ifdef __APPLE__
+        for (int i = 0; i < 300 && !g_omsx_thread_done.load(); ++i) {
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, true);
+        }
+#else
         for (int i = 0; i < 300 && !g_omsx_thread_done.load(); ++i) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+#endif
         if (g_omsx_thread_done.load()) g_omsx_thread.join();
         else g_omsx_thread.detach(); // wedged core; do not hang the caller
     }

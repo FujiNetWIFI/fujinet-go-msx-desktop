@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Five patches:
+Seven patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -77,6 +77,41 @@ Five patches:
    root rather than trying to relocate when it runs -- unlike patches 1-4,
    there is no known legitimate purpose for this call in this project's
    architecture, on any platform.
+
+6. src/video/VisibleSurface.cc (macOS only): NSWindow and GL-context
+   creation dispatched onto the main thread. This constructor runs on this
+   project's own dedicated openMSX thread like everything else in Reactor,
+   and unlike patches 4-5 (hiding the window, skipping SDL's event poll)
+   there is no way to avoid touching AppKit here at all -- a window has to
+   actually be created for openMSX to render into, even a hidden one.
+   Confirmed by a real macOS CI run (once patches 4-5 above stopped
+   masking it): "renderer init failed: Could not create window: NSWindow
+   should only be instantiated on the main thread!" createSurface() and
+   SDL_GL_CreateContext() are wrapped in a dispatch_sync onto the main
+   queue; a C++ exception thrown inside that block runs on a genuinely
+   different thread's stack even though this one is synchronously
+   blocked, so it cannot simply propagate here -- std::exception_ptr
+   captures it inside the block and rethrows it back on this thread once
+   dispatch_sync returns, preserving the exact "renderer init failed"
+   handling msx_host.cc's own catch (FatalError&) already does. Since
+   SDL_GL_CreateContext implicitly makes the new context current on
+   whichever thread creates it (the main thread here, not this one), it is
+   explicitly re-bound with SDL_GL_MakeCurrent() before returning -- every
+   OpenGL call in the rest of this constructor, and every frame openMSX
+   renders afterward, needs the context current on THIS thread.
+   core/openmsx/msx_host.cc's own msxhost_core_start() is the other half
+   of this fix: without it, the main thread would be parked in a plain
+   condition_variable wait during boot, which never services the main
+   dispatch queue, and this dispatch_sync would block forever.
+
+7. build/platform-darwin.mk (macOS only): -fblocks added to TARGET_FLAGS.
+   Patch 6 above uses Clang's Blocks extension (the `^{ ... }` syntax
+   dispatch_sync needs), which Apple Clang enables by default for Darwin
+   targets in every language mode -- but this project has no Mac to
+   confirm that default actually holds for this exact build's compiler
+   invocation, and the cost of being wrong is a wasted CI round-trip for
+   something a single explicit flag avoids entirely. Cheap insurance, not
+   a response to an observed failure.
 
 Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
@@ -268,6 +303,122 @@ def patch_disable_input_poll(stage_dir: str) -> None:
     print(f"Patched {path}: InputEventGenerator::poll() made a no-op")
 
 
+def patch_macos_main_thread_window(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/video/VisibleSurface.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "FujiNet Go MSX (desktop): dispatch window/GL-context creation"
+    if marker in text:
+        return  # already patched
+
+    include_anchor = "#include <ranges>\n\nnamespace openmsx {\n"
+    include = (
+        "#include <ranges>\n"
+        "#ifdef __APPLE__\n"
+        "#include <dispatch/dispatch.h>\n"
+        "#endif\n\n"
+        "namespace openmsx {\n")
+    if include_anchor not in text:
+        fail(f"{path}: '#include <ranges>' / 'namespace openmsx {{' anchor "
+             "not found for the dispatch/dispatch.h include")
+    text = text.replace(include_anchor, include, 1)
+
+    old = (
+        "\tcreateSurface(size, flags);\n"
+        "\tWindowEvent::setMainWindowId(SDL_GetWindowID(window.get()));\n"
+        "\n"
+        "\tglContext = SDL_GL_CreateContext(window.get());\n"
+        "\tif (!glContext) {\n"
+        "\t\tthrow InitException(\n"
+        '\t\t\t"Failed to create " VERSION_STRING " context: ", SDL_GetError());\n'
+        "\t}\n")
+    new = (
+        "#ifdef __APPLE__\n"
+        f"\t// {marker} -- see\n"
+        "\t// patch-staged-tree.py. NSWindow/GL-context creation requires\n"
+        "\t// the main thread; this constructor always runs on this\n"
+        "\t// project's own dedicated openMSX thread (msx_host.cc), never\n"
+        "\t// the main one, so both calls are dispatched there\n"
+        "\t// synchronously instead.\n"
+        "\t__block std::exception_ptr pendingException;\n"
+        "\tdispatch_sync(dispatch_get_main_queue(), ^{\n"
+        "\t\ttry {\n"
+        "\t\t\tthis->createSurface(size, flags);\n"
+        "\t\t\tWindowEvent::setMainWindowId(SDL_GetWindowID(this->window.get()));\n"
+        "\t\t\tthis->glContext = SDL_GL_CreateContext(this->window.get());\n"
+        "\t\t\tif (!this->glContext) {\n"
+        "\t\t\t\tthrow InitException(\n"
+        '\t\t\t\t\t"Failed to create " VERSION_STRING " context: ", SDL_GetError());\n'
+        "\t\t\t}\n"
+        "\t\t} catch (...) {\n"
+        "\t\t\tpendingException = std::current_exception();\n"
+        "\t\t}\n"
+        "\t});\n"
+        "\tif (pendingException) {\n"
+        "\t\tstd::rethrow_exception(pendingException);\n"
+        "\t}\n"
+        "\t// SDL_GL_CreateContext implicitly makes the new context current\n"
+        "\t// on whichever thread creates it (the main thread, above) --\n"
+        "\t// every OpenGL call below this point (and every frame openMSX\n"
+        "\t// renders afterward) needs the context current on THIS thread\n"
+        "\t// instead.\n"
+        "\tif (SDL_GL_MakeCurrent(window.get(), glContext) != 0) {\n"
+        "\t\tthrow InitException(\n"
+        '\t\t\t"Failed to make GL context current: ", SDL_GetError());\n'
+        "\t}\n"
+        "#else\n"
+        "\tcreateSurface(size, flags);\n"
+        "\tWindowEvent::setMainWindowId(SDL_GetWindowID(window.get()));\n"
+        "\n"
+        "\tglContext = SDL_GL_CreateContext(window.get());\n"
+        "\tif (!glContext) {\n"
+        "\t\tthrow InitException(\n"
+        '\t\t\t"Failed to create " VERSION_STRING " context: ", SDL_GetError());\n'
+        "\t}\n"
+        "#endif\n")
+    if old not in text:
+        fail(f"{path}: VisibleSurface window/GL-context creation anchor "
+             "not found (openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: window/GL-context creation dispatched to the "
+          "main thread on macOS")
+
+
+def patch_darwin_blocks_flag(stage_dir: str) -> None:
+    path = f"{stage_dir}/build/platform-darwin.mk"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "TARGET_FLAGS+=-fblocks"
+    if marker in text:
+        return  # already patched
+    old = (
+        "# Enable automatic reference counting in Objective-C\n"
+        "ifneq ($(3RDPARTY_FLAG),true)\n"
+        "TARGET_FLAGS+=-fobjc-arc\n"
+        "endif\n")
+    new = (
+        "# Enable automatic reference counting in Objective-C\n"
+        "ifneq ($(3RDPARTY_FLAG),true)\n"
+        "TARGET_FLAGS+=-fobjc-arc\n"
+        "endif\n"
+        "\n"
+        "# FujiNet Go MSX (desktop): see patch-staged-tree.py. Blocks are the\n"
+        "# dispatch_sync syntax the VisibleSurface.cc patch above needs;\n"
+        f"# {marker} makes that explicit rather than relying on Apple Clang's\n"
+        "# own Darwin-target default.\n"
+        f"{marker}\n")
+    if old not in text:
+        fail(f"{path}: TARGET_FLAGS/-fobjc-arc anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: -fblocks added to TARGET_FLAGS")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -277,6 +428,8 @@ def main() -> None:
     patch_debug_pump_hook(stage_dir)
     patch_hidden_window(stage_dir)
     patch_disable_input_poll(stage_dir)
+    patch_macos_main_thread_window(stage_dir)
+    patch_darwin_blocks_flag(stage_dir)
 
 
 if __name__ == "__main__":
