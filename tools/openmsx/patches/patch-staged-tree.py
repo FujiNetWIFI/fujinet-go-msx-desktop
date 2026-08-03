@@ -159,36 +159,49 @@ Nine patches:
    this project never moves or otherwise manages the hidden window's
    position.
 
-9. build/3rdparty.mk (Windows/mingw-w64 only): -std=gnu17 added to the
-   CFLAGS openMSX's own 3rdparty chain passes when configuring its bundled
-   pkg-config's internal glib. That glib is 2013-era code that declares a
-   struct member and later accesses a union member both literally named
-   `bool` (glib/goption.c) -- legal C at the time, since bool was just an
-   ordinary identifier unless a translation unit opted in via <stdbool.h>.
-   A real Windows CI run failed here with "two or more data types in
-   declaration specifiers" and "expected identifier before 'bool'" at
-   exactly those two spots: the MinGW-w64 GCC this project's windows.yml
-   pulls in defaults to -std=gnu23, where bool/true/false became real
-   keywords, so `gboolean bool;` is parsed as two competing type-specifiers
-   rather than a declaration. -std=gnu17 restores the dialect this bundled
-   module was actually written against.
+9. build/3rdparty.mk: pkg-config's bundled internal glib (2013-era code)
+   declares a struct member and later accesses a union member both
+   literally named `bool` (glib/goption.c) -- legal C when it was written,
+   since bool was just an ordinary identifier unless a translation unit
+   opted in via <stdbool.h>. A real Windows CI run failed here with "two
+   or more data types in declaration specifiers" and "expected identifier
+   before 'bool'" at exactly those two spots: the MinGW-w64 GCC this
+   project's windows.yml pulls in defaults to -std=gnu23, where
+   bool/true/false became real keywords, so `gboolean bool;` is parsed as
+   two competing type-specifiers rather than a declaration.
 
-   Gated to $(OPENMSX_TARGET_OS) = mingw-w64 via a Make $(if $(filter ...))
-   inside the CFLAGS value itself, not applied unconditionally: the first
-   version of this patch had no platform gate at all (the reasoning at the
-   time was that any host GCC defaulting to gnu23 would need it, and
-   Windows was simply the only CI platform where that happened to be true)
-   -- a real macOS CI run immediately falsified that. Apple Clang failed
-   building this same bundled glib once -std=gnu17 was added, with
-   unrelated -Wint-conversion errors in glib/gatomic.c suddenly becoming
-   hard errors despite -Wno-error=int-conversion still being present in
-   the same CFLAGS string (macOS had built this module successfully many
-   times before, always without an explicit -std=). Root cause of Clang's
-   exact interaction there wasn't pinned down further, since gating this
-   patch to mingw-w64 -- the only target that actually needs it -- avoids
-   the question entirely rather than fighting Apple Clang's -std=gnu17
-   behavior to preserve an unconditional-by-default patch with no benefit
-   to any platform besides Windows.
+   The fix renames the identifier directly with a `sed -i` step injected
+   into the Makefile recipe, right after the source is extracted and
+   before ./configure runs, rather than trying to influence the compiler's
+   dialect via CFLAGS. Two earlier versions of this patch tried exactly
+   that (first unconditionally, then gated to $(OPENMSX_TARGET_OS) =
+   mingw-w64 via Make's $(if $(filter ...)) after the unconditional
+   version broke Apple Clang's build of this same module with unrelated
+   -Wint-conversion errors in glib/gatomic.c) -- both were abandoned once
+   reading the real CI log showed pkg-config's own top-level ./configure
+   does not forward CFLAGS to this bundled glib's own recursive
+   ./configure at all (autoconf's own "configure: running .../glib/
+   configure ... 'CC=x86_64-w64-mingw32-gcc'" announcement explicitly
+   shows CC being forwarded and CFLAGS conspicuously absent), so neither
+   CFLAGS-based attempt could ever have worked regardless of gating.
+   Renaming the identifier sidesteps the whole question of which flags
+   reach this compile: it needs no platform gate at all, since the rename
+   is semantically identical on every compiler/dialect and nothing else
+   in this bundled module depends on the field's exact name.
+
+   The -Wint-conversion/gatomic.c failure that motivated gating the second
+   attempt turned out to be a red herring for THIS patch specifically, and
+   not a deterministic regression at all: re-running the already-green
+   macOS build from an earlier, completely unrelated commit (no -std=
+   change of any kind) reproduced the identical gatomic.c failure on one
+   attempt, then SUCCEEDED cleanly on an immediate retry of the exact same
+   unmodified commit -- ruling out both "caused by this patch" and "a
+   permanent environment/toolchain shift", and pointing instead at
+   nondeterministic flakiness across GitHub's macOS runner fleet (plausibly
+   heterogeneous Xcode/Clang images across individual runner instances at
+   the moment, though that specific mechanism isn't confirmed further).
+   Since it reproduces on code this patch never touches, it's tracked and
+   worked separately from this patch; see TODO for current status.
 
 Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
@@ -724,36 +737,57 @@ def patch_darwin_blocks_flag(stage_dir: str) -> None:
     print(f"Patched {path}: -fblocks added to TARGET_FLAGS")
 
 
-def patch_windows_pkgconfig_glib_std(stage_dir: str) -> None:
+def patch_pkgconfig_glib_bool_identifier(stage_dir: str) -> None:
     path = f"{stage_dir}/build/3rdparty.mk"
     with open(path, "r", encoding="utf-8") as f:
         text = f.read()
-    marker = "-std=gnu17"
+    marker = "FujiNet Go MSX (desktop): see patch-staged-tree.py -- this"
     if marker in text:
         return  # already patched
-    old = '\t\tCFLAGS="-Wno-error=int-conversion" \\\n'
+    old = (
+        "# Configure pkg-config.\n"
+        "$(BUILD_DIR)/$(PACKAGE_PKG_CONFIG)/Makefile: \\\n"
+        "  $(SOURCE_DIR)/$(PACKAGE_PKG_CONFIG)/.extracted\n"
+        "\tmkdir -p $(@D)\n"
+        "\tcd $(@D) && $(PWD)/$(<D)/configure \\\n")
     new = (
-        "\t\t# FujiNet Go MSX (desktop): see patch-staged-tree.py -- this\n"
-        "\t\t# bundled pkg-config's internal glib (2013-era) declares a\n"
-        "\t\t# struct/union member literally named `bool` (glib/goption.c),\n"
-        "\t\t# which the MinGW-w64 GCC windows.yml pulls in rejects, since\n"
-        "\t\t# its default C dialect is gnu23, where bool/true/false became\n"
-        "\t\t# real keywords. -std=gnu17 restores the dialect this code was\n"
-        "\t\t# actually written against -- gated to mingw-w64 only: applying\n"
-        "\t\t# it unconditionally broke Apple Clang's build of this same\n"
-        "\t\t# module instead (a real macOS CI regression -- an explicit\n"
-        "\t\t# -std= flag apparently changes int-conversion from a warning\n"
-        "\t\t# back to a hard error there, despite -Wno-error=int-conversion\n"
-        "\t\t# still being present), so this only ever applies for Windows.\n"
-        '\t\tCFLAGS="-Wno-error=int-conversion '
-        f'$(if $(filter mingw-w64,$(OPENMSX_TARGET_OS)),{marker},)" \\\n')
+        "# Configure pkg-config.\n"
+        "$(BUILD_DIR)/$(PACKAGE_PKG_CONFIG)/Makefile: \\\n"
+        "  $(SOURCE_DIR)/$(PACKAGE_PKG_CONFIG)/.extracted\n"
+        "\tmkdir -p $(@D)\n"
+        f"\t# {marker}\n"
+        "\t# bundled pkg-config's internal glib (2013-era) declares a\n"
+        "\t# struct member and later accesses a union member both literally\n"
+        "\t# named `bool` (glib/goption.c) -- legal C when it was written,\n"
+        "\t# since bool was just an ordinary identifier unless a translation\n"
+        "\t# unit opted in via <stdbool.h>. A real Windows CI run failed here\n"
+        "\t# (\"two or more data types in declaration specifiers\" /\n"
+        "\t# \"expected identifier before 'bool'\"): the MinGW-w64 GCC\n"
+        "\t# windows.yml pulls in defaults to -std=gnu23, where bool/true/\n"
+        "\t# false became real keywords. A CFLAGS-based fix (an earlier\n"
+        "\t# version of this patch) does not work: pkg-config's own configure\n"
+        "\t# does not forward CFLAGS to this bundled glib's own recursive\n"
+        "\t# ./configure -- confirmed by reading real CI's own \"configure:\n"
+        "\t# running ... glib/configure ... 'CC=...'\" announcement, where CC\n"
+        "\t# is forwarded but CFLAGS is conspicuously not. Renaming the\n"
+        "\t# identifier directly is a one-line, portable fix that sidesteps\n"
+        "\t# the question of which flags reach this compile entirely --\n"
+        "\t# unconditional (no platform gate needed): the rename is\n"
+        "\t# semantically identical on every compiler/dialect, and this\n"
+        "\t# module has no other code depending on the field's exact name.\n"
+        "\tsed -i.bak \\\n"
+        "\t\t-e 's/gboolean bool;/gboolean bool_val;/' \\\n"
+        "\t\t-e 's/change->prev\\.bool;/change->prev.bool_val;/' \\\n"
+        "\t\t$(PWD)/$(<D)/glib/glib/goption.c\n"
+        "\tcd $(@D) && $(PWD)/$(<D)/configure \\\n")
     if old not in text:
-        fail(f"{path}: pkg-config/glib CFLAGS anchor not found "
+        fail(f"{path}: pkg-config configure-recipe anchor not found "
              "(openMSX source has drifted from the pinned commit?)")
     text = text.replace(old, new, 1)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
-    print(f"Patched {path}: -std=gnu17 added to pkg-config/glib's CFLAGS")
+    print(f"Patched {path}: renamed pkg-config/glib's `bool` identifier "
+          "in goption.c before configure runs")
 
 
 def main() -> None:
@@ -768,7 +802,7 @@ def main() -> None:
     patch_macos_main_thread_window(stage_dir)
     patch_macos_window_teardown(stage_dir)
     patch_darwin_blocks_flag(stage_dir)
-    patch_windows_pkgconfig_glib_std(stage_dir)
+    patch_pkgconfig_glib_bool_identifier(stage_dir)
 
 
 if __name__ == "__main__":
