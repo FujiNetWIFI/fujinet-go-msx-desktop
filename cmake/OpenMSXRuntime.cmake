@@ -110,3 +110,25 @@ if(OPENMSX_3RDPARTY_LIBS)
   set_property(TARGET openmsx-lib APPEND PROPERTY
     INTERFACE_LINK_LIBRARIES "${OPENMSX_3RDPARTY_LIBS}")
 endif()
+
+# Linux: openMSX links these dynamically against the distribution's own
+# copies (LINK_MODE=SYS_DYN, build-openmsx-desktop.sh's default there), so
+# anything linking libopenmsx.a needs them too -- exactly what
+# `ldd derived/*/bin/openmsx` on a native openMSX build shows. macOS and
+# mingw-w64 instead get these from the static 3rd-party archives just
+# globbed above (NEED_3RDPARTY in build-openmsx-desktop.sh), so this block
+# is Linux-only; CPACK_DEBIAN_PACKAGE_SHLIBDEPS/rpmbuild's own dependency
+# generator turn the same linkage into real installed-package dependencies.
+if(UNIX AND NOT APPLE)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(OPENMSX_SYS_DEPS REQUIRED IMPORTED_TARGET
+    sdl2 SDL2_ttf libpng ogg theoradec vorbis glew zlib gl alsa freetype2)
+  find_library(OPENMSX_TCL_LIBRARY NAMES tcl8.6 tcl)
+  if(NOT OPENMSX_TCL_LIBRARY)
+    message(FATAL_ERROR "Tcl library not found (openMSX's scripting engine "
+                        "needs libtcl8.6 or libtcl; no pkg-config module "
+                        "exists for it, so this is a plain find_library).")
+  endif()
+  set_property(TARGET openmsx-lib APPEND PROPERTY
+    INTERFACE_LINK_LIBRARIES PkgConfig::OPENMSX_SYS_DEPS "${OPENMSX_TCL_LIBRARY}")
+endif()
