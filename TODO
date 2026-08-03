@@ -143,52 +143,103 @@ Done (this pass) -- M0
     maintainer says otherwise.
 
 
-Next -- M2
+Done (this pass) -- M2
+----------------------
+
+  * core/openmsx/msx_host.{cc,hh} -- ported from the Android sibling's
+    msx_host.cpp, Android-only halves dropped (no audio ring, no
+    -Wl,--wrap trick, no JNI -- see the M2 commit message and
+    COMPLIANCE.md). Reactor boot (-machine <id> -ext FujiNet, powerOn,
+    run on its own thread) with a real success/failure handshake back to
+    the caller (msxhost_core_start() blocks until known, unlike the
+    Android host's fire-and-forget spawn). SDL_VIDEODRIVER=offscreen
+    headless GL context on Linux; macOS/Windows headless GL are still
+    untested (no Mac/Windows box -- M7/M9). msxhost_notify_frame() packs
+    the FrameSource into XRGB8888 via getLinePtr640_480() only -- see
+    below, this ended up simpler than originally planned.
+  * core/src/session.c + core/include/msxsession.h -- thin lifecycle
+    wrapper (no phase-locked pacer: openMSX paces itself, `throttle on` +
+    `fullspeedwhenloading off` so FujiNet's M3 "loading" hold won't race
+    emulated time), the latest-frame double-buffer, key/joystick
+    passthrough. msxsession_notify_vsync() is advisory only
+    (MSX_PACE_LOG=1 diagnostic). No audio API at all -- openMSX owns its
+    own SDL2 Mixer straight to the real device; this app links no SDL3
+    (confirmed: audio_sdl.c/gamepad_sdl.c from the sibling repos are NOT
+    ported, exactly as planned).
+  * core/src/input_map.c -- msx_key_from_event(), X11 keysym ->
+    SDL_Keycode + mod bits. No MSX keyboard-matrix table needed: openMSX's
+    own Keyboard::processKeyEvent does that translation already.
+  * frontends/gnome/{main,window,display}.c -- window + display + keyboard
+    capture, Reset action, F11 fullscreen. M2 scope only: no menu beyond
+    Reset/About (media import, machine switching, FujiNet config,
+    debugger, preferences all land in M3-M6).
+  * cmake/OpenMSXRuntime.cmake -- Linux dynamic-link deps (SDL2,
+    SDL2_ttf, libpng, ogg/theora/vorbis, GLEW, zlib, GL, ALSA, freetype,
+    Tcl) added, matching `ldd` on a native openMSX build exactly.
+
+  CORRECTED from the original M2 plan (both discovered by testing, not
+  by re-reading the plan):
+    1. msxhost_notify_frame() only needs getLinePtr640_480() -- not a
+       getLinePtr320_240()-vs-640_480() choice keyed off the source
+       resolution. That API scales *any* source frame to a fixed
+       640x480 unconditionally (it exists for exactly this purpose --
+       video recording), so msxsession's frame geometry is FIXED, not
+       variable like the sibling targets. This simplified
+       msxsession_copy_frame() (no w_out/h_out) and display.c (no
+       per-frame texture resize) versus what was planned.
+    2. The plan predicted "openMSX's own executable link now succeeds"
+       once msxhost_notify_frame is defined. This was wrong and stays
+       wrong forever, not just for M2: that symbol is defined in
+       msx_host.cc, which is part of libmsxsession, and is NEVER linked
+       into openMSX's own derived/<platform>/bin/openmsx executable (we
+       only ever extract *objects* from that build, never link the
+       executable itself). build-openmsx-desktop.sh's tolerated-failure
+       branch is a permanent, expected feature of this port, not an
+       M1-only condition -- every future milestone's build log will keep
+       showing it, and that is correct.
+
+  A REAL BUG caught by the clean-clone gate test (see the fix commit
+  after M2's): cmake/OpenMSXRuntime.cmake computed msxsession's
+  per-subdirectory openMSX include path from a file
+  (tools/openmsx/work/out/include-dirs.txt) that only exists after
+  build-openmsx-desktop.sh has already run once -- but a target's
+  INTERFACE_INCLUDE_DIRECTORIES is baked in at CMake *generate* time,
+  which happens once per configure and is never revisited just because a
+  later build step writes a new file. On this development machine the
+  bug was invisible for both the M1 and initial M2 verification passes,
+  because build/ already had a populated include-dirs.txt left over from
+  an earlier successful build in the same tree -- it only showed up when
+  a genuine `git clone --local` into an *empty* directory was tried,
+  which is exactly why that gate exists and is worth re-running for real
+  after every milestone, not just trusted from memory. Fixed by
+  computing the subdirectory list from the staged source tree directly
+  (populated earlier in the same configure pass by StageOpenMSX.cmake)
+  instead of a build-time artifact.
+
+  VERIFIED end to end:
+    - boot_smoke (new ctest): C-BIOS MSX2 boots headless, 30 real
+      non-blank 640x480 frames in 1.45s.
+    - The GNOME frontend launched under a real X11 display (DISPLAY=:1),
+      ran 36s, no crash, no MSX-specific error (only this system's
+      pre-existing GTK/libadwaita theme-CSS warnings, unrelated).
+    - Both ctest cases pass from a fresh `rm -rf build` rebuild AND from
+      a genuine `git clone --local` into an empty directory with no
+      OPENMSX_SRC override (the include-path bug above was caught and
+      fixed via exactly this second check).
+
+
+Next -- M3
 ----------
 
-  core/openmsx/msx_host.{cc,hh}
-    Ported from the Android sibling's msx_host.cpp: Reactor boot
-    (-machine <profile> -ext FujiNet, powerOn, run on its own thread),
-    headless GL context (SDL_VIDEODRIVER=offscreen on Linux; a hidden
-    SDL_WINDOW_HIDDEN|SDL_WINDOW_OPENGL window on macOS/Windows -- both
-    untested so far), and msxhost_notify_frame() -- the function
-    PostProcessor.cc's patched rotateFrames() now calls every frame (see
-    M1) -- packing the FrameSource into XRGB8888 via
-    getLinePtr320_240()/getLinePtr640_480(), the same API PostProcessor's
-    own getScaledFrame() helper uses. Abort the boot before powerOn() if
-    renderer init failed (VDP::reset() derefs a null renderer otherwise).
-
-  core/src/session.c + core/include/msxsession.h
-    Thread lifecycle, the cross-thread command queue (machine switch,
-    reset, plug/unplug, snapshot reads -- everything the UI wants from
-    openMSX, drained on the openMSX thread once per frame from the frame
-    hook). NOT a phase-locked pacer -- openMSX paces itself
-    (`throttle on`, `fullspeedwhenloading off` so FujiNet's "loading"
-    hold doesn't race emulated time). msxsession_notify_vsync() stays in
-    the header for frontend compatibility but is advisory only
-    (MSX_PACE_LOG=1 diagnostic, nothing else). msxsession_render_audio()
-    returns 0 -- openMSX owns its own SDL2 Mixer audio, this app links no
-    SDL3 at all (confirmed: core/src/audio_sdl.c and gamepad_sdl.c from
-    the sibling repos are NOT ported).
-
-  GNOME frontend, WITH_FUJINET=OFF.
-
-  Gate: C-BIOS MSX2 reaches the boot screen, keyboard works, and (unlike
-  M1) openMSX's own executable link now succeeds too -- msxhost_notify_frame
-  is finally defined, so build-openmsx-desktop.sh's tolerated-failure branch
-  should stop triggering. Confirm that before considering this milestone
-  closed: if the tolerated-link-failure branch still fires after M2, that
-  is a real regression, not the expected M1 condition.
+FujiNet in-process: tools/fujinet/build-fujinet-desktop.sh ported from
+coco (~95% target-independent per PORTING.md), PC_TARGET=RS232, BoIP
+65505, web UI 64003. THE LONG POLE per the original milestone plan.
+Gate: press 'c' from C-BIOS, FujiNet CONFIG screen shows a populated
+host list; ss -tnp shows one ESTABLISHED pair on 65505.
 
 
-Then, in order (M3 through M9)
+Then, in order (M4 through M9)
 -------------------------------
-
-  M3  FujiNet in-process: tools/fujinet/build-fujinet-desktop.sh ported
-      from coco (~95% target-independent per PORTING.md), PC_TARGET=RS232,
-      BoIP 65505, web UI 64003. THE LONG POLE. Gate: press 'c' from C-BIOS,
-      FujiNet CONFIG screen shows a populated host list; ss -tnp shows one
-      ESTABLISHED pair on 65505.
 
   M4  Settings store, media import (.dsk/.rom/.cas -> SD folder, carts ->
       cart dir), Import System ROMs (turboR/real-machine), machine profile
