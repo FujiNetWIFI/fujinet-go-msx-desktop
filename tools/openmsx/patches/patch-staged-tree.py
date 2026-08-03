@@ -316,6 +316,21 @@ an on-screen keyboard's synthetic back-to-back press+release.
     valid, identical syntax under both Python 2 and 3 for a single
     argument, so this fix carries no risk of breaking whatever Python 2
     compatibility this file's vintage was originally written for.
+
+    Second bug in the same never-exercised function, found in the same
+    review rather than via a second CI round-trip: _determineMounts()'s
+    `msysRoot = stdoutdata.strip()` keeps stdoutdata as bytes (Python 3's
+    subprocess.communicate() default, no text=True given), then
+    concatenates it with str literals twice further down (`msysRoot +
+    '/etc/fstab'`, `msysRoot + '/'`) -- TypeError: can't concat str to
+    bytes, confirmed by a real Windows CI run immediately after the print
+    fix alone went in. Decoding once, where the bytes value is first
+    captured (`stdoutdata.decode('utf-8').strip()`), fixes both
+    downstream sites in one place. build/executils.py's own
+    captureStdout() already does this correctly (`stdoutdata.decode(
+    'utf-8')`) for its own subprocess output -- this function alone
+    missed it, the same "never run under Python 3 before" story as the
+    print statement.
 """
 import sys
 
@@ -1067,21 +1082,43 @@ def patch_freetype_pkgconfig_version_flag(stage_dir: str) -> None:
           "the pkg-config fallback path")
 
 
-def patch_msysutils_python3_print(stage_dir: str) -> None:
+def patch_msysutils_python3_fixes(stage_dir: str) -> None:
     path = f"{stage_dir}/build/msysutils.py"
     with open(path, "r", encoding="utf-8") as f:
         text = f.read()
     marker = "print(sys.argv[1])"
     if marker in text:
         return  # already patched
-    old = "print sys.argv[1]"
-    if old not in text:
+
+    # Fix 1: a Python-2-only print STATEMENT embedded in a command string
+    # this function shells out to python3 with. See this file's own
+    # docstring for the real Windows CI evidence.
+    old_print = "print sys.argv[1]"
+    if old_print not in text:
         fail(f"{path}: Python-2 print-statement anchor not found "
              "(openMSX source has drifted from the pinned commit?)")
-    text = text.replace(old, marker, 1)
+    text = text.replace(old_print, marker, 1)
+
+    # Fix 2: Popen(..., stdout=PIPE).communicate() returns bytes under
+    # Python 3 (no text=True given), but msysRoot immediately gets
+    # concatenated with str literals twice below (fstab = msysRoot +
+    # '/etc/fstab', then mounts['/'] = msysRoot + '/') -- a
+    # TypeError: can't concat str to bytes real Windows CI hit
+    # immediately after fix 1 above unblocked this function far enough to
+    # reach it. Decoding once here, where the bytes value is first
+    # captured, fixes both downstream concatenations in one place rather
+    # than patching each site separately.
+    old_decode = "\tmsysRoot = stdoutdata.strip()\n"
+    new_decode = "\tmsysRoot = stdoutdata.decode('utf-8').strip()\n"
+    if old_decode not in text:
+        fail(f"{path}: msysRoot bytes/str anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old_decode, new_decode, 1)
+
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
-    print(f"Patched {path}: Python-2 print statement -> Python 3 call")
+    print(f"Patched {path}: two Python 2/3 bugs fixed (print statement, "
+          "bytes/str concatenation)")
 
 
 def main() -> None:
@@ -1100,7 +1137,7 @@ def main() -> None:
     patch_pkgconfig_path_export(stage_dir)
     patch_cross_pkgconfig_exe_suffix(stage_dir)
     patch_freetype_pkgconfig_version_flag(stage_dir)
-    patch_msysutils_python3_print(stage_dir)
+    patch_msysutils_python3_fixes(stage_dir)
 
 
 if __name__ == "__main__":
