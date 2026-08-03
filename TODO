@@ -304,21 +304,83 @@ Done (this pass) -- M3
   "BoIPChannel: connection from: 127.0.0.1" logged, clean shutdown, exit 0.
 
 
-Next -- M4
+Done (this pass) -- M4
+----------------------
+
+  * core/src/settings.c -- ported verbatim from CoCo (renamed). machine
+    and enable_fujinet now persist across runs (msxsession_default_opts
+    reads them instead of hardcoding C-BIOS MSX2 / fujinet-on).
+  * core/openmsx/msx_host.{hh,cc} -- msxhost_switch_machine(): a second
+    cross-thread queue (parallel to the existing input-event one, drained
+    the same way from the frame hook) running openMSX's own Tcl
+    "machine <id>" (Reactor::switchMachine(), confirmed by reading
+    src/Reactor.cc's MachineCommand -- genuinely built into openMSX for
+    live switching) followed by "ext FujiNet" (confirmed by reading
+    MSXMotherBoard.cc's ExtCmd that a machine switch rebuilds the whole
+    board and does NOT carry the old one's extensions over -- this would
+    have been a silent "FujiNet stops working after switching machines"
+    bug if missed). Machine ids are validated against a safe-character
+    set before being interpolated into the Tcl command string.
+  * core/src/session.c -- msxsession_set_machine()/machine() (persist +
+    live-switch-if-running), msxsession_import_media() (.dsk/.cas ->
+    FujiNet SD, .rom -> carts_dir) and msxsession_import_rom() (->
+    roms_dir), ported from CoCo's pattern.
+  * core/tests/machine_switch_test.c (new ctest) -- the real proof: boots
+    MSX2, live-switches to MSX1 with the session staying "running"
+    throughout, confirms frames keep flowing post-switch (no wedge), and
+    confirms a FRESH BOIP connection appears after the switch (not just
+    the old one lingering) -- i.e. "ext FujiNet" genuinely landed on the
+    new board.
+  * frontends/gnome/window.c -- Machine radio submenu (live switching),
+    Import Disk/Cassette/Cartridge…, FujiNet Configuration… (system
+    browser via GtkUriLauncher -- no embedded WebKitGTK yet, M5+),
+    FujiNet Console Log… (plain GtkTextView dialog).
+
+  SCOPE CUT, documented rather than silently dropped: real-gamepad-to-
+  msxjoystick binding (letting a physical SDL gamepad drive
+  msxjoystick1/2 instead of the synthetic on-screen/keyboard-driven
+  ports) is NOT done. openMSX auto-detects real joysticks itself (it
+  owns SDL2), but the msxjoystick1_config/msxjoystick2_config Tcl
+  bindings msx_host.cc sets at boot only recognise the synthetic
+  "joy1"/"joy2" ids -- a real pad plugged into the host is not bound to
+  anything today. This needs UI to let the user pick which pad drives
+  which port (mirroring the sibling repos' gamepad_sdl.c layer design)
+  more than it needs new session/host plumbing, so it is deferred rather
+  than half-built. Revisit alongside M5 (KDE) or as its own pass.
+
+  msxsession_import_rom() (turboR/real-machine ROM -> roms_dir) is built
+  and tested via the generic copy_file() path it shares with
+  import_media, but deliberately NOT wired into the GNOME menu: openMSX
+  needs a machine-config XML matching the real machine's hardwareconfig
+  to actually boot from an imported ROM, and this milestone does not
+  build that generator. Exposing "Import System ROM…" in the UI now
+  would suggest a capability that does not exist yet.
+
+  VERIFIED end to end: all 4 ctest cases pass, both from a rebuild in
+  place and from a genuine fresh `git clone --local` with no *_SRC
+  overrides -- clean this time, no third clean-clone-only bug.
+  machine_switch_test's own run: MSX2 boots (serial=1), live switch to
+  MSX1 (serial=32 after, frames kept flowing), FujiNet's old connection
+  drops and a fresh one lands within ~100ms of the switch. The GNOME
+  frontend launched under a live X11 display with the new menu wired in
+  (FujiNet now starts automatically, enable_fujinet defaulting to 1 via
+  settings) and the console log showed REAL rs232Fuji command traffic
+  (GET WIFI STATUS, READ HOST SLOTS, READ DEVICE SLOTS) -- proof the MSX
+  software stack itself is talking to FujiNet over the real protocol,
+  not just a socket-level probe. No crash; only this system's
+  pre-existing GTK theme-CSS warnings, unrelated to this code.
+
+
+Next -- M5
 ----------
 
-Settings store, media import (.dsk/.rom/.cas -> SD folder, carts -> cart
-dir), Import System ROMs (turboR/real-machine), machine profile switching
-(MSX/MSX2/MSX2+/turboR) with clean restart, joystick binding driven
-through openMSX Tcl (plug joyporta msxjoystick1, joystick1_config) via
-the command queue.
+KDE frontend (Qt6 Widgets). Doing this early is what keeps the core
+honest about staying toolkit-agnostic -- window.c/display.c above are the
+reference to port from.
 
 
-Then, in order (M5 through M9)
+Then, in order (M6 through M9)
 -------------------------------
-
-  M5  KDE frontend (Qt6 Widgets). Doing this early is what keeps the core
-      honest about staying toolkit-agnostic.
 
   M6  Debugger engine: z80dasm.{c,h} ported verbatim from adam-desktop
       (same CPU, already tested). Pause/step/continue call
