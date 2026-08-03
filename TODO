@@ -846,14 +846,50 @@ Done (this pass) -- M9 (in progress)
     Win32 API call or a real msxsession_*/msxdebug_*/msxvdp_* function --
     nothing stray.
 
-  NOT done yet: build-aux/windows/installer.nsi, release.yml, v0.1.0 --
-  the remaining M9 items, picked up next.
+  * build-aux/windows/installer.nsi + .github/workflows/release.yml --
+    written and committed (ad92e2c).
+
+  macOS CI (macos.yml): went from "does not link at all" through a real
+  chain of distinct bugs, each root-caused from actual CI log evidence
+  (never guessed), each fixed and re-verified on real CI before moving to
+  the next -- Cocoa_RegisterApp/NSApplication setup needing the main
+  thread, SDL's Cocoa event pump needing the main thread, NSWindow
+  construction/title/resize/fullscreen/teardown all needing the main
+  thread (msxRunOnMainThread() in patch-staged-tree.py, dispatch_sync +
+  std::exception_ptr), a self-deadlock risk in the boot-wait itself once
+  window creation moved onto the dispatch path (fixed with a
+  CFRunLoopRunInMode-polling boot-wait instead of a blind
+  condition_variable::wait_for), the same deadlock class recurring for
+  every msxhost_execute_sync()/_binary() RPC call once boot-time frames
+  started flowing (wait_rpc_done(), same CFRunLoopRunInMode pattern), and
+  finally the same class a third time for machine_switch_test specifically
+  -- msxhost_switch_machine() is fire-and-forget (queues Tcl commands,
+  does not go through msxhost_execute_sync), so the test's own polling
+  loop needed the same treatment; pulled into a shared core/tests/
+  test_sleep.h since all six ctest binaries had copy-pasted the same
+  plain-nanosleep sleep_ms(). None of this is a production concern for
+  the shipped macOS app itself -- AppKit's own run loop always services
+  the main dispatch queue as a side effect of normal event handling, so a
+  live machine switch in real use was never at risk; it was specific to
+  the ctest binaries having no run loop of their own.
+
+  CONFIRMED on real macOS CI (commit fc3920e): all 8 ctest tests pass,
+  including machine_switch_test, boot_smoke, fujinet_smoke, rpc_test,
+  debugger_test, vdp_test. Linux and Flatpak also green on that commit.
+
+  Windows CI (windows.yml) still fails on a pre-existing, unrelated issue:
+  openMSX's vendored 3rd-party pkg-config-0.29.2 build compiles its own
+  bundled glib against a modern MinGW GCC that treats `bool` as a real
+  keyword (glib/goption.c:169/1603, "two or more data types in
+  declaration specifiers" / "expected identifier before 'bool'") --
+  confirmed identical on every push since it first appeared, not a
+  regression from any change in this pass. Deferred by explicit prior
+  agreement; not yet investigated further.
 
 Then, in order (M9 continued)
 ------------------------------
 
-  build-aux/windows/installer.nsi (NSIS installer, now that the Windows
-  frontend exists), release.yml, then cut v0.1.0.
+  Windows CI's pkg-config/glib bool-keyword build failure, then v0.1.0.
 
 
 Known issues / things to remember
