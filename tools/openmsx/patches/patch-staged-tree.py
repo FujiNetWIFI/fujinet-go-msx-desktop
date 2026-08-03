@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Eleven patches:
+Twelve patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -273,6 +273,27 @@ an on-screen keyboard's synthetic back-to-back press+release.
     comparing, so the returned path is still the exact real filename on
     disk either way (no behavior change on Linux/macOS, where the
     extension-less form is already correct).
+
+12. build/libraries.py: FreeType.getVersion() uses --modversion instead of
+    --ftversion when its own getConfigScript() fell back to pkg-config.
+    A real Windows CI run's probe.log (only visible after this same
+    session added a diagnostic that prints it -- see build-openmsx-
+    desktop.sh) showed FREETYPE: Found header / Found lib (patches 9-11
+    above all worked) immediately followed by:
+    `Error executing ".../pkg-config.exe freetype2 --ftversion"` /
+    `Unknown option --ftversion`. --ftversion is a real freetype-config
+    flag, but this bundled freetype (like patch 9's docstring already
+    established, quoting this exact file's own comment) "no longer
+    installs the freetype-config script by default", so
+    getConfigScript() always falls back to invoking pkg-config directly
+    here -- and pkg-config's own version flag is --modversion, not
+    --ftversion. The base Library.getVersion() already handles exactly
+    this distinction (`elif 'pkg-config' in configScript: return
+    '`%s --modversion`' ...`); FreeType's own override just never
+    replicated that same check when it added its own getConfigScript()
+    fallback. Cosmetic only (a missing version string, not a detection
+    failure -- header/lib were already found), but a real, verifiable
+    bug all the same.
 """
 import sys
 
@@ -984,6 +1005,46 @@ def patch_cross_pkgconfig_exe_suffix(stage_dir: str) -> None:
           "cross-pkg-config too")
 
 
+def patch_freetype_pkgconfig_version_flag(stage_dir: str) -> None:
+    path = f"{stage_dir}/build/libraries.py"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "FujiNet Go MSX (desktop): see patch-staged-tree.py -- --ftversion"
+    if marker in text:
+        return  # already patched
+    old = (
+        "\t@classmethod\n"
+        "\tdef getVersion(cls, platform, linkStatic, distroRoot):\n"
+        "\t\tconfigScript = cls.getConfigScript(platform, linkStatic, distroRoot)\n"
+        "\t\treturn '`%s --ftversion`' % configScript\n")
+    new = (
+        "\t@classmethod\n"
+        "\tdef getVersion(cls, platform, linkStatic, distroRoot):\n"
+        "\t\tconfigScript = cls.getConfigScript(platform, linkStatic, distroRoot)\n"
+        f"\t\t# {marker} is a real\n"
+        "\t\t# freetype-config flag, but this class's own getConfigScript()\n"
+        "\t\t# above falls back to invoking pkg-config directly whenever the\n"
+        "\t\t# real freetype-config script isn't installed (true for this\n"
+        "\t\t# bundled freetype -- see that method's own comment), and\n"
+        "\t\t# pkg-config's version flag is --modversion, not --ftversion --\n"
+        "\t\t# the same distinction the base Library.getVersion() already\n"
+        "\t\t# handles, just never replicated here. A real Windows CI run's\n"
+        "\t\t# probe.log confirmed the mismatch: 'Unknown option --ftversion'\n"
+        "\t\t# from pkg-config, despite FreeType's header and lib both\n"
+        "\t\t# already being found correctly.\n"
+        "\t\tif 'pkg-config' in configScript:\n"
+        "\t\t\treturn '`%s --modversion`' % configScript\n"
+        "\t\treturn '`%s --ftversion`' % configScript\n")
+    if old not in text:
+        fail(f"{path}: FreeType.getVersion() anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: FreeType.getVersion() now uses --modversion on "
+          "the pkg-config fallback path")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -999,6 +1060,7 @@ def main() -> None:
     patch_pkgconfig_glib_bool_identifier(stage_dir)
     patch_pkgconfig_path_export(stage_dir)
     patch_cross_pkgconfig_exe_suffix(stage_dir)
+    patch_freetype_pkgconfig_version_flag(stage_dir)
 
 
 if __name__ == "__main__":

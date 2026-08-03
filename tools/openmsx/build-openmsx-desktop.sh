@@ -68,6 +68,25 @@ case "${TARGET_OS}" in
   darwin|mingw-w64) NEED_3RDPARTY=1 ;;
 esac
 
+# openMSX's own build/executils.py:captureStdout() -- what runs every
+# *-config script (sdl2-config, libpng-config, ...) during build/probe.py's
+# library detection -- only routes a command through `sh -c` (needed since
+# Windows' CreateProcess cannot execute a #!/bin/sh script directly, unlike
+# POSIX) when build/msysutils.py's msysActive() returns true, and that
+# checks OSTYPE=='msys' or MSYSCON in the environment -- MSYS1-era
+# variables, not MSYS2's own MSYSTEM. This script's own bash.exe (the CI
+# workflow's real MSYS2 shell) is invoked non-interactively as
+# `bash.exe build-openmsx-desktop.sh`, which does not source the profile
+# scripts that would normally set OSTYPE -- confirmed by a real Windows CI
+# run's probe.log showing sdl2-config/libpng-config both failing with
+# "[WinError 2] The system cannot find the file specified" (Windows trying
+# to execute the shell script directly), while pkg-config -- a real .exe,
+# needing no shell wrapper at all -- worked fine. Set explicitly rather
+# than relying on whatever the outer shell happened to inherit; gated to
+# mingw-w64 only, since OSTYPE is a real, meaningful value on every other
+# platform this script runs on and must not be overwritten there.
+[[ "${TARGET_OS}" == "mingw-w64" ]] && export OSTYPE=msys
+
 JOBS="${OPENMSX_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
 MAKE_VARS=(OPENMSX_FLAVOUR=opt PYTHON=python3)
