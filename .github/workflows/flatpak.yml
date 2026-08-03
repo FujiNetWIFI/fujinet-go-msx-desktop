@@ -8,16 +8,21 @@ name: Flatpak
 # sdl2, sdl2_ttf, libogg, libvorbis, libtheora, glew -- plus mbedtls and the
 # FujiNet web UI's Python deps) was downloaded and its SHA256 verified for
 # real while writing these manifests, and the tcl module's full build+
-# install recipe was confirmed correct end to end locally. The final
-# flatpak-builder finalization step (its own debuginfo-extraction pass) did
-# not complete in the local development sandbox used to write this
-# (an eu-strip/rofiles-fuse permission error that reproduced identically
-# in a plain /tmp directory outside the repo, strongly suggesting a nested-
-# sandboxing artifact of that specific environment rather than a manifest
-# defect -- both manifests now also set no-debuginfo: true, which avoids
-# the failing step entirely regardless of its cause). This workflow running
-# on a normal GitHub Actions runner is the first full, unencumbered
-# verification.
+# install recipe was confirmed correct end to end locally.
+#
+# --disable-rofiles-fuse: flatpak-builder's default build-time overlay (a
+# FUSE mount layering writes over the read-only cached module install) hits
+# an eu-strip "Permission denied" during its own debuginfo-extraction pass
+# in a plain containerized environment -- confirmed for real on both this
+# session's own dev sandbox AND a genuine GitHub Actions ubuntu-latest run
+# (the first real run of this workflow, before this flag was added), so
+# this is a real, repeatable containerized-CI limitation, not a one-off.
+# The CoCo sibling repo's own already-working flatpak.yml carries the exact
+# same flag for the exact same reason; ported directly rather than
+# rediscovered independently, now that the failure is confirmed identical.
+# (Both manifests also set no-debuginfo: true regardless -- a reasonable
+# production choice on its own merits, avoiding the failing pass' cause
+# entirely for a local flatpak-builder new enough to honor it.)
 #
 # No WITH_*_ROMS flag needed here either, matching linux.yml: C-BIOS is
 # bundled unconditionally (see COMPLIANCE.md).
@@ -60,4 +65,5 @@ jobs:
       # but there is nothing here to run it against on a headless runner.)
       - name: Build
         run: |
-          flatpak-builder --user --force-clean build-flatpak "${{ matrix.manifest }}"
+          flatpak-builder --user --force-clean --disable-rofiles-fuse \
+            build-flatpak "${{ matrix.manifest }}"
