@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Nine patches:
+Ten patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -207,6 +207,39 @@ Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
 down/up pairs with real dwell time; that patch exists only to compensate for
 an on-screen keyboard's synthetic back-to-back press+release.
+
+10. build/3rdparty.mk: PKG_CONFIG_PATH exported alongside the existing
+    PKG_CONFIG export, pointing at this same 3rdparty chain's own
+    $(INSTALL_DIR)/lib/pkgconfig. A real Windows CI run got past all four
+    pkg-config/glib bugs above (patch 9) and progressed into SDL2_ttf's
+    own ./configure, which failed there with "*** Unable to find
+    FreeType2 library" despite freetype2.pc being right there in that
+    exact install/lib/pkgconfig directory (confirmed in the same log:
+    freetype's own install step puts it there a few thousand lines
+    earlier) -- because nothing ever told the freshly cross-built
+    pkg-config binary to look in it. "checking for sdl2 >= 2.0.10... no"
+    (immediately above, same log) shows this isn't freetype-specific:
+    pkg-config-based detection was silently failing for every 3rdparty
+    package this whole time, just papered over for SDL2 because SDL2 also
+    installs a working sdl2-config fallback script that autoconf falls
+    back to -- freetype apparently doesn't install an equivalent
+    freetype-config for this freetype version/configuration, so SDL2_ttf
+    had no fallback left and the configure hard-failed.
+
+    Exported unconditionally (not gated to any platform): this is a
+    strict addition to pkg-config's search path, so it can only let
+    pkg-config find MORE .pc files it previously couldn't -- it cannot
+    break a lookup that was already succeeding some other way (a
+    fallback script, or a check that didn't need pkg-config at all), on
+    any platform. macOS's own 3rdparty chain builds successfully without
+    this export today, most likely because its freetype build happens to
+    produce a working freetype-config there too -- but there's no
+    downside to fixing the actual gap (a missing PKG_CONFIG_PATH,
+    normally implied/inherited from a real pkg-config installation but
+    absent here since this cross-built pkg-config binary has no system
+    install to inherit it from) globally rather than leaving it to keep
+    silently degrading to fragile *-config-script fallbacks everywhere
+    it happens to still work.
 """
 import sys
 
@@ -861,6 +894,35 @@ def patch_pkgconfig_glib_bool_identifier(stage_dir: str) -> None:
           "configure runs")
 
 
+def patch_pkgconfig_path_export(stage_dir: str) -> None:
+    path = f"{stage_dir}/build/3rdparty.mk"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "export PKG_CONFIG_PATH:="
+    if marker in text:
+        return  # already patched
+    old = "export PKG_CONFIG:=$(PWD)/$(TOOLS_DIR)/bin/$(TARGET_TRIPLE)-pkg-config\n"
+    new = (
+        "export PKG_CONFIG:=$(PWD)/$(TOOLS_DIR)/bin/$(TARGET_TRIPLE)-pkg-config\n"
+        "# FujiNet Go MSX (desktop): see patch-staged-tree.py -- without this,\n"
+        "# the freshly cross-built pkg-config above has no PKG_CONFIG_PATH at\n"
+        "# all, so it never finds any .pc file this same 3rdparty chain\n"
+        "# installs for its own later packages to depend on (confirmed by a\n"
+        "# real Windows CI run: SDL2_ttf's ./configure failed to find\n"
+        "# freetype2.pc despite it being right there in this exact\n"
+        "# directory). A strict addition -- can only let pkg-config find\n"
+        "# .pc files it previously couldn't -- so it is safe unconditionally.\n"
+        f"{marker}$(PWD)/$(INSTALL_DIR)/lib/pkgconfig\n"
+    )
+    if old not in text:
+        fail(f"{path}: PKG_CONFIG export anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: exported PKG_CONFIG_PATH for the 3rdparty chain")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -874,6 +936,7 @@ def main() -> None:
     patch_macos_window_teardown(stage_dir)
     patch_darwin_blocks_flag(stage_dir)
     patch_pkgconfig_glib_bool_identifier(stage_dir)
+    patch_pkgconfig_path_export(stage_dir)
 
 
 if __name__ == "__main__":
