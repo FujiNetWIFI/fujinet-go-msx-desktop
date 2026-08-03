@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Thirteen patches:
+Fourteen patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -331,6 +331,40 @@ an on-screen keyboard's synthetic back-to-back press+release.
     'utf-8')`) for its own subprocess output -- this function alone
     missed it, the same "never run under Python 3 before" story as the
     print statement.
+
+14. src/events/Socket.hh (Windows only): #undef interface right after
+    <winsock2.h>/<ws2tcpip.h>. With patches 9-13 above, real Windows CI
+    got past every build-tooling issue and started compiling real openMSX
+    C++ source -- and immediately hit "error: expected ',' or '...'
+    before 'struct'" in src/serial/I8251.hh, and the identical error
+    pattern in five more headers (MSXFacMidiInterface.hh, MSXMidi.hh,
+    MSXMirrorDevice.hh, MSXRS232.hh, NowindCommand.hh) before the
+    compiler gave up on this one translation unit. Root cause, confirmed
+    directly from the real MinGW-w64 headers on this dev machine: `struct
+    I8251(Scheduler&, I8251Interface& interface, EmuTime)` -- interface
+    is an ordinary parameter name here -- but MinGW's own basetyps.h/
+    combaseapi.h/rpc.h (COM headers, pulled in transitively by
+    <windows.h>) `#define interface struct`, so the token literally
+    becomes `I8251Interface& struct)`, corrupting the declaration.
+
+    The real CI log's own #include chain traced this to its source:
+    DeviceFactory.cc includes FujiNet.hh includes Socket.hh, which
+    #include <winsock2.h> unconditionally on Windows (necessary --
+    that's this project's own cross-platform socket abstraction) --
+    winsock2.h pulls in windows.h, which poisons `interface` for every
+    header included afterward in the same translation unit, including
+    these completely unrelated serial/MIDI/storage device headers that
+    just happen to use "interface" as an ordinary parameter name.
+    #undef interface immediately after Socket.hh's own Windows-only
+    winsock includes -- the earliest point the pollution can be
+    undone -- fixes every downstream header in one place, matching the
+    standard, well-known fix for this exact class of MinGW/Windows
+    portability issue rather than renaming the parameter in however many
+    files use it. Only #undef interface for now, not the other common
+    windows.h macro poisons (small, IN, OUT, etc.) -- none have been
+    confirmed as actual errors yet, and this session's discipline
+    throughout has been to fix what real evidence shows, not what might
+    theoretically also be broken.
 """
 import sys
 
@@ -1121,6 +1155,43 @@ def patch_msysutils_python3_fixes(stage_dir: str) -> None:
           "bytes/str concatenation)")
 
 
+def patch_windows_interface_macro(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/events/Socket.hh"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "FujiNet Go MSX (desktop): see patch-staged-tree.py -- MinGW's"
+    if marker in text:
+        return  # already patched
+    old = (
+        "#include <winsock2.h>\n"
+        "#include <ws2tcpip.h>\n"
+        "#endif\n")
+    new = (
+        "#include <winsock2.h>\n"
+        "#include <ws2tcpip.h>\n"
+        f"// {marker} own COM headers\n"
+        "// (basetyps.h/combaseapi.h/rpc.h, pulled in transitively by the\n"
+        "// <windows.h> the above winsock includes drag in) #define\n"
+        "// interface struct -- poisoning every header included afterward\n"
+        "// in the same translation unit that uses \"interface\" as an\n"
+        "// ordinary parameter name (confirmed on a real Windows CI run:\n"
+        "// src/serial/I8251.hh and five other completely unrelated\n"
+        "// headers all failed with \"expected ',' or '...' before\n"
+        "// 'struct'\" from exactly this). Undoing it here, right after\n"
+        "// the includes that introduce it, is the standard fix for this\n"
+        "// well-known MinGW/Windows portability gotcha.\n"
+        "#undef interface\n"
+        "#endif\n")
+    if old not in text:
+        fail(f"{path}: winsock2/ws2tcpip include anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: #undef interface after the Windows socket "
+          "headers")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -1138,6 +1209,7 @@ def main() -> None:
     patch_cross_pkgconfig_exe_suffix(stage_dir)
     patch_freetype_pkgconfig_version_flag(stage_dir)
     patch_msysutils_python3_fixes(stage_dir)
+    patch_windows_interface_macro(stage_dir)
 
 
 if __name__ == "__main__":
