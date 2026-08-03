@@ -10,8 +10,10 @@
 #include <QSurfaceFormat>
 
 #include <cstdio>
+#include <cstdlib>
 
 #include "MainWindow.h"
+#include "debugger/DebuggerWindow.h"
 #include "msxsession.h"
 
 int main(int argc, char *argv[])
@@ -47,6 +49,11 @@ int main(int argc, char *argv[])
 
     MainWindow win(session);
     win.show();
+
+    /* Developer affordance shared with the other frontends. */
+    if (std::getenv("MSX_OPEN_DEBUGGER"))
+        DebuggerWindow::showFor(&win, session);
+
     const int rc = app.exec();
 
     msxsession_free(session);

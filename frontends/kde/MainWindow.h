@@ -21,6 +21,7 @@ private:
     void buildMenus();
     void importMedia();
     void status(const QString &message);
+    void showDebugger();
 
     msxsession *m_session;
     DisplayWidget *m_display;

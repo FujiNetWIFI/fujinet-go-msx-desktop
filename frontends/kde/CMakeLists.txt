@@ -25,6 +25,7 @@ add_executable(fujinet-go-msx-kde
   MainWindow.cpp
   DisplayWidget.cpp
   FujiNetWindows.cpp
+  debugger/DebuggerWindow.cpp
 )
 
 target_link_libraries(fujinet-go-msx-kde PRIVATE

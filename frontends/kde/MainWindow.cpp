@@ -24,6 +24,7 @@
 
 #include "DisplayWidget.h"
 #include "FujiNetWindows.h"
+#include "debugger/DebuggerWindow.h"
 
 #ifndef MSX_VERSION_STRING
 #define MSX_VERSION_STRING "0.0.0"
@@ -55,6 +56,11 @@ MainWindow::MainWindow(msxsession *session, QWidget *parent)
 void MainWindow::status(const QString &message)
 {
     statusBar()->showMessage(message, 6000);
+}
+
+void MainWindow::showDebugger()
+{
+    DebuggerWindow::showFor(this, m_session);
 }
 
 void MainWindow::importMedia()
@@ -114,6 +120,10 @@ void MainWindow::buildMenus()
                        [this] { fujinet_config_show(this, m_session); });
     fujinet->addAction(QStringLiteral("Console &Log…"), this,
                        [this] { fujinet_log_show(this, m_session); });
+
+    QMenu *view = menuBar()->addMenu(QStringLiteral("&View"));
+    view->addAction(QStringLiteral("&Debugger"), QKeySequence(Qt::Key_F12),
+                    this, &MainWindow::showDebugger);
 
     QMenu *help = menuBar()->addMenu(QStringLiteral("&Help"));
     help->addAction(QStringLiteral("&About"), this, [this] {
