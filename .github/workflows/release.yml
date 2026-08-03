@@ -1,0 +1,446 @@
+name: Release
+
+# M9: cutting a release. Triggered by a `v*` tag, builds every artifact this
+# repository publishes -- Linux packages for both frontends (.deb/.rpm/
+# .tar.gz via CPack), both flatpak single-file bundles, a zipped macOS app
+# bundle and a Windows portable zip + NSIS installer -- and attaches them to
+# a draft GitHub Release. Same shape as the sibling fujinet-go-coco-desktop/
+# fujinet-go-adam-desktop/fujinet-go-apple2-desktop repos' release process.
+#
+# The version is declared in the tree, not derived from the tag, so a
+# downloaded build's About box can never disagree with the download it came
+# from: the version-check job below fails loudly if the tag,
+# CMakeLists.txt's project(... VERSION ...) and both frontends' metainfo
+# <release version="..."> entries do not all agree. See "Cutting a release"
+# in the README.
+#
+# Unlike the sibling repos, no separate static-SDL step is needed anywhere
+# here: openMSX supplies its own SDL2 (dynamically linked from the system
+# package on Linux, statically built from source via its own NEED_3RDPARTY
+# chain on macOS/Windows -- see cmake/OpenMSXRuntime.cmake and
+# tools/openmsx/build-openmsx-desktop.sh), so the macOS/Windows push-CI jobs
+# already produce a self-contained static build with no further work needed
+# for a release. No WITH_*_ROMS=OFF flag either, matching linux.yml/
+# macos.yml/windows.yml: C-BIOS is bundled unconditionally (see
+# COMPLIANCE.md), so this is the one FujiNet Go target whose release builds
+# boot real firmware rather than skipping ROM-gated tests.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag, CMakeLists.txt and both metainfo files must all agree
+        id: v
+        run: |
+          tag="${GITHUB_REF#refs/tags/v}"
+          echo "tag version: $tag"
+          cmake_version=$(sed -n 's/^project([^)]*VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
+          echo "CMakeLists.txt version: $cmake_version"
+          if [ "$tag" != "$cmake_version" ]; then
+            echo "::error::tag v$tag does not match CMakeLists.txt's project() VERSION $cmake_version"
+            exit 1
+          fi
+          for m in frontends/gnome/data/*.metainfo.xml frontends/kde/data/*.metainfo.xml; do
+            if ! grep -q "<release version=\"$tag\"" "$m"; then
+              echo "::error::$m has no <release version=\"$tag\"> entry"
+              exit 1
+            fi
+          done
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+  linux-packages:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        frontend: [gnome, kde]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same package list as linux.yml, plus dpkg-dev/rpm for CPack's DEB
+      # and RPM generators (ubuntu-latest has dpkg-deb already; rpmbuild
+      # does not ship by default).
+      - name: Install build tools, openMSX's own dependencies, and frontend toolkits
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build python3 pkg-config git \
+            tcl-dev libsdl2-dev libsdl2-ttf-dev libpng-dev libogg-dev \
+            libvorbis-dev libtheora-dev libglew-dev zlib1g-dev \
+            libfreetype-dev libgl-dev libasound2-dev \
+            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
+            qt6-base-dev libqt6opengl6-dev qt6-webengine-dev \
+            desktop-file-utils appstream dpkg-dev rpm
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DFRONTEND=${{ matrix.frontend }}
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Package (deb, rpm, tar.gz)
+        working-directory: build
+        run: cpack -G "DEB;RPM;TGZ"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.frontend }}
+          path: |
+            build/*.deb
+            build/*.rpm
+            build/*.tar.gz
+          if-no-files-found: error
+
+  flatpaks:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest:
+          - build-aux/flatpak/online.fujinet.go.msx.gnome.yml
+          - build-aux/flatpak/online.fujinet.go.msx.kde.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak and flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --if-not-exists --user flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install the runtime and SDK this manifest targets
+        run: |
+          runtime=$(sed -n 's/^runtime: *//p' "${{ matrix.manifest }}")
+          runtime_version=$(sed -n "s/^runtime-version: *'\(.*\)'/\1/p" "${{ matrix.manifest }}")
+          sdk=$(sed -n 's/^sdk: *//p' "${{ matrix.manifest }}")
+          flatpak install -y --user flathub \
+            "${runtime}/x86_64/${runtime_version}" \
+            "${sdk}/x86_64/${runtime_version}"
+
+      # The same no-op eu-strip stub flatpak.yml needs (see that workflow's
+      # own header comment for the full diagnosis): flatpak-builder's own
+      # debuginfo-extraction pass cannot get past eu-strip on this runner's
+      # sandboxing. /usr/local/bin already precedes elfutils' /usr/bin on
+      # PATH on ubuntu-latest.
+      - name: Work around eu-strip failing under this runner's sandboxing
+        run: |
+          sudo tee /usr/local/bin/eu-strip > /dev/null <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          sudo chmod +x /usr/local/bin/eu-strip
+
+      - name: Build and export to a local repo
+        run: |
+          flatpak-builder --user --force-clean --repo=repo \
+            --disable-rofiles-fuse build-flatpak "${{ matrix.manifest }}"
+
+      - name: Bundle into a single installable file
+        id: bundle
+        run: |
+          app_id=$(sed -n 's/^app-id: *//p' "${{ matrix.manifest }}")
+          flatpak build-bundle repo "${app_id}.flatpak" "${app_id}" master
+          echo "app_id=${app_id}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-${{ steps.bundle.outputs.app_id }}
+          path: '*.flatpak'
+          if-no-files-found: error
+
+  windows-package:
+    needs: check-version
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # See windows.yml's own comment: autocrlf would rewrite every
+          # staged/patched openMSX/FujiNet source file's line endings on
+          # checkout, which is exactly the kind of diff-shaped noise
+          # cmake/StageOpenMSX.cmake's re-stage detection is not expecting.
+          fetch-depth: 1
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            make
+            autoconf
+            automake
+            libtool
+            nasm
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-nsis
+
+      - name: Configure
+        run: cmake -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      # Both binaries in the artifact must depend only on system DLLs and
+      # the runtime's own copies (never MSYS's) -- the FujiNet DLL or the
+      # frontend shipping an MSYS import (e.g. libcrypto/zlib1) would launch
+      # fine here but LoadLibrary-fail on a clean Windows box, same trap
+      # fujinet-go-coco-desktop's own check exists to catch. ldd resolves
+      # against this machine's PATH, where the MSYS copies exist, so the
+      # import table is checked instead -- that reports a dependency as
+      # satisfied that the target will not have. openMSX's own 3rdparty
+      # chain (Tcl/SDL2/SDL2_ttf/freetype/libpng/zlib/ogg/vorbis/theora/
+      # GLEW) is statically archived into libopenmsx.a for this target (see
+      # cmake/OpenMSXRuntime.cmake's NEED_3RDPARTY path), so none of that
+      # shows up as a DLL dependency here -- only opengl32 (the one thing
+      # that chain cannot avoid linking dynamically) joins the sibling
+      # repos' own system-DLL whitelist.
+      - name: Verify the shipped binaries are self-contained
+        run: |
+          fail=0
+          EXE=build/frontends/windows/fujinet-go-msx-windows.exe
+          DLL=tools/fujinet/work/out/fujinet.dll
+          for f in "$EXE" "$DLL"; do
+            test -f "$f" || { echo "::error::$f not built"; exit 1; }
+            echo "--- $f imports ---"
+            imports=$(objdump -p "$f" | sed -n 's/^\s*DLL Name: //p' | sort -u)
+            echo "$imports"
+            bad=$(echo "$imports" | grep -ivE \
+              '^(api-ms-win-[a-z0-9el-]+|kernel32|user32|gdi32|advapi32|shell32|ole32|oleaut32|comctl32|comdlg32|imm32|winmm|version|setupapi|dwmapi|ws2_32|iphlpapi|bcrypt|crypt32|secur32|netapi32|userenv|dbghelp|shlwapi|msvcrt|ucrtbase|rpcrt4|winspool|uxtheme|hid|cfgmgr32|powrprof|avrt|dxgi|d3d11|opengl32|glu32)\.dll$' \
+              || true)
+            if [ -n "$bad" ]; then
+              echo "::error::$f imports non-system DLLs that are not shipped:"
+              echo "$bad"
+              fail=1
+            fi
+          done
+          deps=$(ldd "$EXE" 2>/dev/null || true)
+          if echo "$deps" | grep -iE "/ucrt64|/mingw|/msys"; then
+            echo "::error::MSYS/MinGW runtime DLL leaked into the exe"
+            fail=1
+          fi
+          exit $fail
+
+      # The portable artifact is the folder you copy and run: the exe,
+      # fujinet.dll beside it (where the session looks first), the pristine
+      # FujiNet runtime tree it provisions from, and the openMSX runtime
+      # share tree (init.tcl, scripts/, machines/ incl. C-BIOS, extensions/
+      # incl. FujiNet.xml) the emulator core itself needs to boot at all --
+      # the one addition beyond the CoCo/ADAM staging shape, since those
+      # cores need no equivalent share tree. The installer packages this
+      # same staged folder, so the two downloads are the same bits, packaged
+      # twice.
+      - name: Stage the app folder
+        run: |
+          mkdir -p dist/FujiNet-Go-MSX/fujinet
+          cp build/frontends/windows/fujinet-go-msx-windows.exe \
+             dist/FujiNet-Go-MSX/
+          cp tools/fujinet/work/out/fujinet.dll dist/FujiNet-Go-MSX/
+          cp tools/fujinet/work/out/fnconfig.ini dist/FujiNet-Go-MSX/fujinet/
+          cp -r tools/fujinet/work/out/data tools/fujinet/work/out/SD \
+             dist/FujiNet-Go-MSX/fujinet/
+          cp -r tools/openmsx/work/out/share dist/FujiNet-Go-MSX/openmsx
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable
+          path: dist/FujiNet-Go-MSX
+          if-no-files-found: error
+
+      - name: Build the installer
+        run: |
+          makensis -V2 \
+            -DVERSION="${{ needs.check-version.outputs.version }}" \
+            -DSRCDIR="$(cygpath -w "$PWD/dist/FujiNet-Go-MSX")" \
+            -DOUTFILE="$(cygpath -w "$PWD/dist/FujiNet-Go-MSX-Setup.exe")" \
+            -DAPPICON="$(cygpath -w "$PWD/frontends/windows/app.ico")" \
+            build-aux/windows/installer.nsi
+          test -f dist/FujiNet-Go-MSX-Setup.exe \
+            || { echo "::error::installer not produced"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/FujiNet-Go-MSX-Setup.exe
+          if-no-files-found: error
+
+  macos-package:
+    needs: check-version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same as macos.yml: build tools only, no brew-installed SDL2/Tcl/etc
+      # -- openMSX supplies its own static 3rd-party chain for this target
+      # (see this workflow's own header comment).
+      - name: Install build tools
+        run: brew install cmake ninja python3 pkg-config autoconf automake libtool
+
+      - name: Configure
+        run: cmake -B build -G Ninja
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Verify the bundle is self-contained
+        run: |
+          APP="build/frontends/macos/FujiNet Go MSX.app"
+          leaked=0
+          while IFS= read -r -d '' f; do
+            if file "$f" | grep -q "Mach-O"; then
+              if otool -L "$f" | tail -n +2 | grep -E "/opt/homebrew|/usr/local"; then
+                echo "--- $f"
+                otool -L "$f"
+                leaked=1
+              fi
+            fi
+          done < <(find "$APP" -type f -print0)
+          if [ "$leaked" -ne 0 ]; then
+            echo "::error::non-system library leaked into the app bundle"
+            exit 1
+          fi
+          test -f "$APP/Contents/Frameworks/libfujinet.dylib" \
+            || { echo "::error::libfujinet.dylib missing from the bundle"; exit 1; }
+          test -f "$APP/Contents/Resources/openmsx/init.tcl" \
+            || { echo "::error::openMSX runtime share tree missing from the bundle"; exit 1; }
+
+      # Signing and notarisation, when the credentials are configured (see
+      # "Signing the macOS build" in the README). Without them this is a
+      # no-op and the build still produces a working, unsigned bundle.
+      - name: Sign and notarise the app bundle
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERTIFICATE }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          set -euo pipefail
+          APP="build/frontends/macos/FujiNet Go MSX.app"
+          if [ -z "${CERT_P12}" ]; then
+            echo "No signing certificate configured -- shipping unsigned."
+            exit 0
+          fi
+
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PWD="$(uuidgen)"
+          security create-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PWD" "$KEYCHAIN"
+          printf '%s' "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PWD" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" \
+            $(security list-keychains -d user | sed 's/["[:space:]]//g')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+          codesign --force --timestamp --options runtime \
+            --sign "$SIGN_IDENTITY" "$APP/Contents/Frameworks/libfujinet.dylib"
+          codesign --force --timestamp --options runtime \
+            --sign "$SIGN_IDENTITY" "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+
+          if [ -z "${NOTARY_KEY}" ]; then
+            echo "::warning::Signed, but no notary credentials -- Gatekeeper"
+            echo "::warning::will still block this build on first launch."
+            exit 0
+          fi
+
+          printf '%s' "$NOTARY_KEY" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          ditto -c -k --keepParent "$APP" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/notary.p8" --key-id "$NOTARY_KEY_ID" \
+            --issuer "$NOTARY_ISSUER" --wait
+          xcrun stapler staple "$APP"
+          xcrun stapler validate "$APP"
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+      # ditto preserves the executable bits and structure that a plain
+      # artifact upload of a .app directory does not.
+      - name: Zip app bundle
+        run: |
+          ditto -c -k --keepParent \
+            "build/frontends/macos/FujiNet Go MSX.app" \
+            FujiNet-Go-MSX-macos.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: FujiNet-Go-MSX-macos.zip
+          if-no-files-found: error
+
+  release:
+    needs: [check-version, linux-packages, flatpaks, windows-package, macos-package]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # download-artifact unpacks each artifact into its own directory, so
+      # the folder-shaped Windows portable build is re-zipped here, and the
+      # Windows/macOS assets get the tag folded into their name to match the
+      # CPack-named Linux packages sitting next to them.
+      - name: Flatten artifacts into one release/ directory
+        run: |
+          tag="${{ needs.check-version.outputs.version }}"
+          mkdir -p release
+          find artifacts -type f \( -name '*.deb' -o -name '*.rpm' \
+                                    -o -name '*.tar.gz' -o -name '*.flatpak' \) \
+            -exec cp {} release/ \;
+          (cd "artifacts/windows-portable" \
+           && zip -qr "$OLDPWD/release/fujinet-go-msx-${tag}-windows.zip" .)
+          cp "artifacts/windows-installer/FujiNet-Go-MSX-Setup.exe" \
+             "release/fujinet-go-msx-${tag}-windows-setup.exe"
+          cp "artifacts/macos-app/FujiNet-Go-MSX-macos.zip" \
+             "release/fujinet-go-msx-${tag}-macos.zip"
+          ls -l release
+
+      - name: Create (or update) the draft release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="v${{ needs.check-version.outputs.version }}"
+          if ! gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$tag" --repo "${{ github.repository }}" \
+              --draft --generate-notes --title "$tag"
+          fi
+          gh release upload "$tag" release/* --repo "${{ github.repository }}" --clobber
