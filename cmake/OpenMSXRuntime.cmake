@@ -158,10 +158,15 @@ add_dependencies(openmsx-lib openmsx-build)
 # build/libraries.py resolves the GL library to on this platform (`-framework
 # OpenGL`, not a pkg-config module the way Linux's `gl` is); the rest is the
 # standard framework set SDL2's own build links on macOS for windowing/
-# audio/joystick/haptics -- confirmed necessary by a real macOS CI failure
-# whose undefined-symbol list spanned CoreFoundation, CoreMIDI, Foundation
-# (Objective-C runtime calls) and OpenGL functions all at once, the exact
-# fallout of a build with no framework linkage at all.
+# audio/joystick/haptics -- confirmed necessary across two real macOS CI
+# failures, first one whose undefined-symbol list spanned CoreFoundation,
+# CoreMIDI, Foundation (Objective-C runtime calls) and OpenGL functions all
+# at once (a build with no framework linkage at all), then a second,
+# far smaller one (Metal/CoreHaptics symbols only, from SDL2's optional
+# Metal renderer backend and its GameController-based rumble/haptics
+# support) once the first, much larger gap was closed -- both fixed from
+# the same real-CI-evidence loop, not guessed at once from a components
+# list.
 if(APPLE)
   set_property(TARGET openmsx-lib APPEND PROPERTY
     INTERFACE_LINK_LIBRARIES
@@ -170,7 +175,7 @@ if(APPLE)
     "-framework Foundation" "-framework OpenGL" "-framework Cocoa"
     "-framework CoreVideo" "-framework CoreAudio" "-framework AudioToolbox"
     "-framework IOKit" "-framework Carbon" "-framework ForceFeedback"
-    "-framework GameController")
+    "-framework GameController" "-framework Metal" "-framework CoreHaptics")
 endif()
 
 # Linux: openMSX links these dynamically against the distribution's own
