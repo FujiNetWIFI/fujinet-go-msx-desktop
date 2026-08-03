@@ -404,8 +404,8 @@ Done (this pass) -- M5
   with no *_SRC overrides.
 
 
-In progress -- M6
------------------
+Done (this pass) -- M6
+----------------------
 
 Debugger engine + the V9938/V9958 VDP debugger + the GNOME debugger
 window. The largest single milestone; read this in full before
@@ -563,15 +563,57 @@ override was only ever a build-dir cache value) plus ctest:
     shows up correctly in the hex dump, and the palette renderer produces
     a non-uniform buffer.
 
-  NOT yet done in M6: the GNOME debugger window (frontends/gnome/
-  debugger/dbg_window.c) and wiring F12 into the frontends. The engine and
-  VDP decoder underneath it are built and tested; nothing sits on top of
-  them in the UI yet.
+Third pass -- the GNOME debugger window:
+
+  * frontends/gnome/debugger/dbg_window.{c,h} -- ported from adam-desktop's
+    dbg_window.c: disassembly with a click-to-toggle breakpoint gutter,
+    editable registers (Enter applies while paused, byte-pair fields
+    matching msxdebug_z80_regs' layout), a memory view, a breakpoint list,
+    and the VDP tab (nametable/pattern/sprite/palette pictures, decoded
+    register/status/command-engine text via msxvdp_format_state, and a
+    physical-VRAM hex editor). F5 pause/continue, F7 step into, F8 step
+    over, Shift+F8 step out -- same bindings as ADAM's. NOT ported: the
+    Trace tab (msxdebug has no instruction-trace ring -- see the M6
+    engine notes above; this is not an oversight, there is nothing for a
+    trace tab to show).
+  * frontends/gnome/window.c -- F12 (already reserved from forwarding to
+    the MSX since M2) now opens the debugger; a "Debugger (F12)" menu
+    entry added; MSX_OPEN_DEBUGGER=1 dev affordance opens it alongside the
+    main window at startup (matching the sibling repos), MSX_DEBUGGER_TAB=
+    vdp on the debugger window itself selects the starting tab.
+  * VDP chip (V9918/V9938/V9958) is inferred once at debugger-window-open
+    time from the current machine id (chip_from_machine()) rather than
+    tracked live -- reopening the window after an M4 live machine switch
+    picks up the new chip, judged an acceptable simplification over
+    threading a live chip-change notification through for a debugging UI.
 
   VERIFIED end to end: full 8-test ctest suite (the 4 from M1-M5, rpc_test,
-  and the three new this pass -- dasm_test, debugger_test, vdp_test) passes
-  after forcing a completely fresh rebuild (re-staged openMSX, re-cloned
-  fujinet-firmware, fresh build/ directory) -- not just an in-place rebuild.
+  and dasm_test/debugger_test/vdp_test) passes after forcing a completely
+  fresh rebuild (re-staged openMSX, re-cloned fujinet-firmware, fresh
+  build/ directory) -- not just an in-place rebuild. The GNOME frontend
+  itself launched under a real X11 display with MSX_OPEN_DEBUGGER=1
+  MSX_DEBUGGER_TAB=vdp: C-BIOS MSX2 booted, FujiNet connected (BoIPChannel
+  accepted, real rs232Fuji traffic -- GET WIFI STATUS, READ HOST SLOTS,
+  READ DEVICE SLOTS -- logged same as prior milestones), and the debugger
+  window opened alongside it on the VDP tab with no crash and no
+  debugger-specific GTK critical/error over a 20+ second run (only this
+  system's pre-existing theme-CSS warnings, unrelated, same noise every
+  milestone's GNOME verification has already shown). A screenshot tool
+  was not available in this environment to additionally eyeball the
+  rendered layout; functional correctness of every value the window
+  displays is what ctest's debugger_test/vdp_test actually verify.
+
+M6 is COMPLETE with two scope cuts stated plainly rather than silently
+dropped, both documented above and worth restating here: (1) no
+instruction-trace ring (architecturally not viable over a Tcl RPC at full
+CPU speed, unlike ADAM's native exec hook), and (2) VDP raster rendering
+(nametable/pattern/sprite pictures) covers only the MSX1-compatible modes
+-- Graphic 4-7 bitmap modes, sprite mode 2, and YJK/YAE color decode are
+not rendered as pictures yet (msxvdp_format_state's text decode covers
+every mode; only the pictures are narrower). The register/status/palette/
+memory/command-engine side of the VDP debugger -- the part a real
+debugging session leans on most -- is complete for V9918/V9938/V9958
+alike.
 
 
 Then, in order (M7 through M9)

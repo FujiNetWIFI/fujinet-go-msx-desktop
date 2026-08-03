@@ -69,6 +69,19 @@ void msxdebug_vdp_snapshot(msxdebug *d, msxvdp_chip chip, msxvdp_snapshot *out)
     }
 }
 
+int msxdebug_vdp_write(msxdebug *d, uint32_t addr, const uint8_t *src, int n)
+{
+    char cmd[64];
+    int i;
+    (void)d;
+    for (i = 0; i < n; i++) {
+        snprintf(cmd, sizeof(cmd), "debug write {physical VRAM} %u %u",
+                (unsigned)(addr + (uint32_t)i), (unsigned)src[i]);
+        msxhost_execute_sync(cmd, NULL, 0);
+    }
+    return n;
+}
+
 /* ---- register / status / mode text -------------------------------------- */
 
 static void put_rgba(uint8_t *dst, uint8_t r8, uint8_t g8, uint8_t b8)

@@ -25,6 +25,7 @@
 
 #include <string.h>
 
+#include "debugger/dbg_window.h"
 #include "display.h"
 
 struct _MsxWindow {
@@ -73,7 +74,7 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval,
             gtk_window_fullscreen(GTK_WINDOW(self));
         return TRUE;
     case GDK_KEY_F12:
-        /* Debugger lands in M6; swallow the key rather than forward it. */
+        msx_debugger_show(GTK_WINDOW(self), self->session);
         return TRUE;
     default:
         break;
@@ -227,6 +228,15 @@ static void action_fujinet_log(GSimpleAction *action, GVariant *param,
     gtk_window_present(GTK_WINDOW(dialog));
 }
 
+static void action_debugger(GSimpleAction *action, GVariant *param,
+                            gpointer user_data)
+{
+    MsxWindow *self = MSX_WINDOW(user_data);
+    (void)action;
+    (void)param;
+    msx_debugger_show(GTK_WINDOW(self), self->session);
+}
+
 static void action_about(GSimpleAction *action, GVariant *param,
                          gpointer user_data)
 {
@@ -252,6 +262,7 @@ static const GActionEntry win_actions[] = {
     {.name = "import-media", .activate = action_import_media},
     {.name = "fujinet-config", .activate = action_fujinet_config},
     {.name = "fujinet-log", .activate = action_fujinet_log},
+    {.name = "debugger", .activate = action_debugger},
     {.name = "about", .activate = action_about},
 };
 
@@ -291,6 +302,7 @@ static GMenu *build_menu(msxsession *session)
     g_menu_append(fujinet, "FujiNet Console Log…", "win.fujinet-log");
     g_menu_append_section(menu, "FujiNet", G_MENU_MODEL(fujinet));
 
+    g_menu_append(tail, "Debugger (F12)", "win.debugger");
     g_menu_append(tail, "About FujiNet Go MSX", "win.about");
     g_menu_append_section(menu, NULL, G_MENU_MODEL(tail));
 
@@ -364,6 +376,8 @@ GtkWidget *msx_window_new(AdwApplication *app, msxsession *session)
     gtk_widget_grab_focus(GTK_WIDGET(self->display));
 
     /* Developer affordance, matching the sibling repos: open the debugger
-     * alongside the main window (M6; a no-op until then). */
+     * alongside the main window. */
+    if (getenv("MSX_OPEN_DEBUGGER"))
+        msx_debugger_show(GTK_WINDOW(self), session);
     return GTK_WIDGET(self);
 }

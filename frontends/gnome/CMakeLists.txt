@@ -2,7 +2,7 @@
 # still build the core / other frontends.
 #
 # M2 scope: no embedded FujiNet web view yet (WITH_WEBVIEW / WebKitGTK land
-# with the FujiNet runtime in M3), no debugger window (M6).
+# with the FujiNet runtime in M3). Debugger window added M6.
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(ADW IMPORTED_TARGET libadwaita-1>=1.4 gtk4>=4.10)
@@ -16,6 +16,7 @@ set(GNOME_SOURCES
   main.c
   window.c
   display.c
+  debugger/dbg_window.c
 )
 
 set(GNOME_APP_ID online.fujinet.go.msx.gnome)

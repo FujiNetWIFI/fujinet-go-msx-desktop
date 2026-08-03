@@ -86,6 +86,13 @@ typedef struct {
  * guessed here. */
 void msxdebug_vdp_snapshot(msxdebug *d, msxvdp_chip chip, msxvdp_snapshot *out);
 
+/* Writes n bytes into "physical VRAM" starting at addr (17-bit,
+ * mode-independent -- same address space msxvdp_format_hex reads from).
+ * Side-effect free with respect to the VDP's own address latch/read-ahead
+ * state, same guarantee adam-desktop's adamdebug_vdp_write documents.
+ * Returns n. */
+int msxdebug_vdp_write(msxdebug *d, uint32_t addr, const uint8_t *src, int n);
+
 /* ---- mode decode ----------------------------------------------------- */
 
 typedef struct {
