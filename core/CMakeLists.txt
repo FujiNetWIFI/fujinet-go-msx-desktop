@@ -19,6 +19,7 @@ pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
 add_library(msxsession STATIC
   src/session.c
   src/paths.c
+  src/settings.c
   src/input_map.c
   src/fujinet_runtime.c
   openmsx/msx_host.cc
@@ -95,3 +96,13 @@ set_tests_properties(fujinet_smoke PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
 # this same configure pass; valid because add_dependencies() only needs the
 # named target to exist by *generate* time, not at the point of this call.
 add_dependencies(fujinet_smoke fujinet-runtime)
+
+# M4 gate: openMSX's own live "machine <id>" switch (msxhost_switch_machine)
+# actually works in place -- the session never stops, frames keep arriving
+# after the switch, and (when FujiNet is available) the re-inserted "ext
+# FujiNet" produces a fresh BOIP connection rather than a silently
+# extension-less machine.
+add_executable(machine_switch_test tests/machine_switch_test.c)
+target_link_libraries(machine_switch_test PRIVATE msxsession)
+add_test(NAME machine_switch_test COMMAND machine_switch_test)
+set_tests_properties(machine_switch_test PROPERTIES TIMEOUT 60)

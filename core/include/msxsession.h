@@ -112,7 +112,7 @@ typedef struct {
 /* Fills opts from the settings store (default: C-BIOS MSX2). */
 void msxsession_default_opts(msxsession *s, msxsession_start_opts *opts);
 
-/* Boots openMSX (and, once M3 lands, starts FujiNet first). Blocks until the
+/* Starts FujiNet first (if enabled), then boots openMSX. Blocks until the
  * boot has succeeded or failed, so a bad machine id is reported here rather
  * than producing a black window. Returns 0 on success, -1 with
  * msxsession_last_error() set. */
@@ -120,6 +120,17 @@ int  msxsession_start(msxsession *s, const msxsession_start_opts *opts);
 void msxsession_stop(msxsession *s);
 int  msxsession_is_running(const msxsession *s);
 const char *msxsession_last_error(const msxsession *s);
+
+/* ---- live machine switching -----------------------------------------------
+ * Switches the running machine in place via openMSX's own
+ * Reactor::switchMachine(), re-inserting the FujiNet extension afterward --
+ * no session restart, no FujiNet reconnect (openMSX's FujiNet cartridge
+ * device retries its own connection anyway, but switching in place avoids
+ * even that brief gap). Persists the choice to the settings store so the
+ * next start uses it too. If the session is not currently running, this
+ * only updates what the next msxsession_start() will boot. */
+void msxsession_set_machine(msxsession *s, const char *machine_id);
+const char *msxsession_machine(const msxsession *s);
 
 /* ---- video -----------------------------------------------------------------
  * The emulator thread stores the latest frame (published from

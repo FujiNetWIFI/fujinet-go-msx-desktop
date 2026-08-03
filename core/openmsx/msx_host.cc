@@ -75,6 +75,11 @@ openmsx::Reactor* g_reactor = nullptr;     // valid only on the openMSX thread
 std::mutex g_event_mutex;
 std::vector<openmsx::Event> g_event_queue;
 
+// Tcl commands (machine switching -- see msxhost_switch_machine), queued the
+// same way and drained on the openMSX thread from the frame hook.
+std::mutex g_command_mutex;
+std::vector<std::string> g_command_queue;
+
 void set_error(const std::string& msg) {
     std::fprintf(stderr, "msx_host: %s\n", msg.c_str());
     g_last_error = msg;
@@ -91,12 +96,32 @@ void drain_pending_events() {
     std::vector<openmsx::Event> pending;
     {
         std::lock_guard<std::mutex> lk(g_event_mutex);
-        if (g_event_queue.empty()) return;
-        pending.swap(g_event_queue);
+        if (!g_event_queue.empty()) pending.swap(g_event_queue);
     }
     auto& dist = g_reactor->getEventDistributor();
     for (auto& e : pending) {
         dist.distributeEvent(std::move(e));
+    }
+}
+
+void drain_pending_commands() {
+    if (!g_reactor) return;
+    std::vector<std::string> pending;
+    {
+        std::lock_guard<std::mutex> lk(g_command_mutex);
+        if (g_command_queue.empty()) return;
+        pending.swap(g_command_queue);
+    }
+    auto& cc = g_reactor->getCommandController();
+    for (auto& cmd : pending) {
+        try {
+            cc.executeCommand(cmd);
+        } catch (openmsx::MSXException& e) {
+            std::fprintf(stderr, "msx_host: command \"%s\" failed: %s\n",
+                        cmd.c_str(), e.getMessage().c_str());
+        } catch (...) {
+            std::fprintf(stderr, "msx_host: command \"%s\" failed\n", cmd.c_str());
+        }
     }
 }
 
@@ -233,6 +258,7 @@ namespace { inline void msx_thread_setname_shim() { msx_thread_setname_shim_impl
 // 640x480 XRGB8888 buffer the frame sink expects -- no GL readback.
 extern "C" void msxhost_notify_frame(const openmsx::FrameSource* frame) {
     drain_pending_events();
+    drain_pending_commands();
     if (!g_frame_sink || !frame) return;
 
     static thread_local std::vector<uint32_t> capture(
@@ -389,6 +415,29 @@ void msxhost_set_joystick_button(int port, int id, int pressed) {
         case MSXHOST_JOY_TRIG_B: enqueue_joy_button(port, 1, pressed != 0); break;
         default: break;
     }
+}
+
+void msxhost_switch_machine(const char* machine_id) {
+    if (!machine_id || !*machine_id) return;
+    // Machine ids are openMSX machine config names (alphanumeric, '-', '_',
+    // '+') -- reject anything containing Tcl-special characters rather than
+    // quote them, since a malformed profile id has no legitimate reason to
+    // need them.
+    for (const char* p = machine_id; *p; ++p) {
+        if (*p == ' ' || *p == '"' || *p == '{' || *p == '}' ||
+            *p == '[' || *p == ']' || *p == ';' || *p == '\n') {
+            std::fprintf(stderr,
+                        "msx_host: rejecting machine id with unsafe "
+                        "characters: %s\n", machine_id);
+            return;
+        }
+    }
+    std::lock_guard<std::mutex> lk(g_command_mutex);
+    g_command_queue.emplace_back(std::string("machine ") + machine_id);
+    // openMSX's own machine switch rebuilds the whole MSXMotherBoard, which
+    // does not carry over the previous board's extensions -- re-insert
+    // FujiNet the same way the initial boot does.
+    g_command_queue.emplace_back("ext FujiNet");
 }
 
 }  // extern "C"

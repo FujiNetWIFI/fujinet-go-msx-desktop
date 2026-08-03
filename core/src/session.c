@@ -127,9 +127,10 @@ msxsession *msxsession_new(const msxsession_paths *paths)
 
     pthread_mutex_init(&s->lifecycle_mtx, NULL);
     pthread_mutex_init(&s->frame_mtx, NULL);
+    settings_init(s);
 
     snprintf(s->cur_machine, sizeof(s->cur_machine), "%s",
-             MSXSESSION_MACHINE_MSX2);
+             msxsession_get_str(s, "machine", MSXSESSION_MACHINE_MSX2));
     return s;
 }
 
@@ -137,6 +138,8 @@ void msxsession_free(msxsession *s)
 {
     if (!s) return;
     msxsession_stop(s);
+    msxsession_settings_flush(s);
+    settings_free_all(s);
     pthread_mutex_destroy(&s->lifecycle_mtx);
     pthread_mutex_destroy(&s->frame_mtx);
     free(s->frame);
@@ -145,10 +148,13 @@ void msxsession_free(msxsession *s)
 
 void msxsession_default_opts(msxsession *s, msxsession_start_opts *opts)
 {
-    (void)s;
     memset(opts, 0, sizeof(*opts));
-    opts->machine = MSXSESSION_MACHINE_MSX2;
-    opts->enable_fujinet = 1;
+    /* The pointer msxsession_get_str returns stays valid for the session's
+     * lifetime (settings.c never frees a value until msxsession_free), so
+     * it is safe for the caller to hold onto opts->machine past this call
+     * -- which msxsession_start does, copying it into cur_machine. */
+    opts->machine = msxsession_get_str(s, "machine", MSXSESSION_MACHINE_MSX2);
+    opts->enable_fujinet = msxsession_get_int(s, "enable_fujinet", 1);
 }
 
 int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
@@ -222,6 +228,20 @@ void msxsession_stop(msxsession *s)
     pthread_mutex_unlock(&s->lifecycle_mtx);
 }
 
+void msxsession_set_machine(msxsession *s, const char *machine_id)
+{
+    if (!s || !machine_id || !*machine_id) return;
+    snprintf(s->cur_machine, sizeof(s->cur_machine), "%s", machine_id);
+    msxsession_set_str(s, "machine", machine_id);
+    if (s->running)
+        msxhost_switch_machine(machine_id);
+}
+
+const char *msxsession_machine(const msxsession *s)
+{
+    return s ? s->cur_machine : "";
+}
+
 int msxsession_is_running(const msxsession *s)
 {
     return s && s->running;
@@ -270,6 +290,91 @@ const char *msxsession_sd_path(const msxsession *s)     { return s->fujinet_sd; 
 const char *msxsession_fujinet_webui_url(const msxsession *s)
 {
     return s->webui_url;
+}
+
+/****************************************************************************/
+/** Media import                                                           **/
+/****************************************************************************/
+
+static const char *path_ext(const char *path)
+{
+    const char *dot = strrchr(path, '.');
+    const char *slash = strrchr(path, '/');
+    if (!dot || (slash && dot < slash)) return "";
+    return dot + 1;
+}
+
+static int ext_is(const char *ext, const char *want)
+{
+    for (; *ext && *want; ext++, want++)
+        if ((*ext | 0x20) != *want) return 0;
+    return *ext == '\0' && *want == '\0';
+}
+
+int msxsession_import_rom(msxsession *s, const char *src_path,
+                          char *dest_out, int dest_sz)
+{
+    const char *base = strrchr(src_path, '/');
+    char dst[MSX_PATH_MAX];
+
+    base = base ? base + 1 : src_path;
+    if (!*base) {
+        session_set_error(s, "Not a file: %s", src_path);
+        return -1;
+    }
+
+    mkdir_p(s->roms_dir);
+    snprintf(dst, sizeof(dst), "%s/%s", s->roms_dir, base);
+    if (copy_file(src_path, dst) != 0) {
+        session_set_error(s, "Could not copy %s to %s", src_path, dst);
+        return -1;
+    }
+    if (dest_out && dest_sz > 0)
+        snprintf(dest_out, (size_t)dest_sz, "%s", dst);
+    return 0;
+}
+
+int msxsession_import_media(msxsession *s, const char *src_path,
+                            char *dest_out, int dest_sz)
+{
+    /* Disk and cassette images go to FujiNet's SD directory, to be mounted
+     * from the web UI. Cartridge images are openMSX's business, not
+     * FujiNet's, so they go to the session's own cartridge directory. */
+    static const char *const k_disk_exts[] = { "dsk", "cas", NULL };
+    static const char *const k_cart_exts[] = { "rom", NULL };
+    const char *ext = path_ext(src_path);
+    const char *base = strrchr(src_path, '/');
+    const char *dir = NULL;
+    char dst[MSX_PATH_MAX];
+    int i;
+
+    base = base ? base + 1 : src_path;
+    for (i = 0; k_disk_exts[i] && !dir; i++)
+        if (ext_is(ext, k_disk_exts[i])) dir = s->fujinet_sd;
+    for (i = 0; k_cart_exts[i] && !dir; i++)
+        if (ext_is(ext, k_cart_exts[i])) dir = s->carts_dir;
+
+    if (!dir) {
+        session_set_error(s, "Unsupported media type \".%s\" (expected a "
+                          "disk or cassette image: .dsk .cas, or a "
+                          "cartridge: .rom)", ext);
+        return -1;
+    }
+    if (!dir[0]) {
+        session_set_error(s, "No FujiNet SD directory (FujiNet runtime "
+                          "unavailable)");
+        return -1;
+    }
+
+    mkdir_p(dir);
+    snprintf(dst, sizeof(dst), "%s/%s", dir, base);
+    if (copy_file(src_path, dst) != 0) {
+        session_set_error(s, "Could not copy %s to %s", src_path, dst);
+        return -1;
+    }
+    if (dest_out && dest_sz > 0)
+        snprintf(dest_out, (size_t)dest_sz, "%s", dst);
+    return 0;
 }
 
 int msxsession_fujinet_running(const msxsession *s)

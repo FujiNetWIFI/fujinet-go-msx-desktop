@@ -97,6 +97,18 @@ enum {
 };
 void msxhost_set_joystick_button(int port, int id, int pressed);
 
+/* --- live machine switching (M4) -----------------------------------------
+ * Switches the running machine in place, via openMSX's own
+ * Reactor::switchMachine() (the "machine <id>" Tcl command) followed by
+ * re-inserting the FujiNet extension (openMSX's own machine switch tears
+ * down and rebuilds the whole MSXMotherBoard, including whatever
+ * extensions the previous one had -- "ext FujiNet" is not carried over
+ * automatically). Queued and executed on the openMSX thread from the frame
+ * hook, same as key/joystick input; safe to call from any thread. No-op if
+ * openMSX is not currently running (msxhost_select_machine + a fresh
+ * msxhost_core_start is the path for that case instead). */
+void msxhost_switch_machine(const char* machine_id);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

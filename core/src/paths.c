@@ -315,6 +315,9 @@ int paths_init(msxsession *s, const msxsession_paths *p)
     if (mkdir_p(s->config_dir) != 0 || mkdir_p(s->data_dir) != 0)
         return -1;
 
+    snprintf(s->settings_file, sizeof(s->settings_file), "%s/settings.ini",
+             s->config_dir);
+
     if (resolve_openmsx_share(s, p ? p->openmsx_share : NULL) != 0) {
         session_set_error(s,
             "Could not find the openMSX runtime share tree (init.tcl). "

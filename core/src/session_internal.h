@@ -20,6 +20,12 @@
 #define MSX_FB_PIXELS \
     (MSXSESSION_FB_WIDTH * MSXSESSION_FB_HEIGHT)
 
+typedef struct setting_kv {
+    char *key;
+    char *val;
+    struct setting_kv *next;
+} setting_kv;
+
 struct msxsession {
     /* ---- resolved paths ---- */
     char config_dir[MSX_PATH_MAX];
@@ -27,6 +33,7 @@ struct msxsession {
     char openmsx_share[MSX_PATH_MAX];
     char roms_dir[MSX_PATH_MAX];   /* imported turboR/real-machine ROMs (M4) */
     char carts_dir[MSX_PATH_MAX];  /* imported cartridge images (M4) */
+    char settings_file[MSX_PATH_MAX];
     char fujinet_lib[MSX_PATH_MAX];   /* "" = unavailable/disabled (M3) */
     char fujinet_src[MSX_PATH_MAX];   /* provisioning source override */
     char fujinet_root[MSX_PATH_MAX];
@@ -34,6 +41,11 @@ struct msxsession {
     char fujinet_sd[MSX_PATH_MAX];
     char fujinet_data[MSX_PATH_MAX];
     char webui_url[64];
+
+    /* ---- settings store ---- */
+    pthread_mutex_t settings_mtx;
+    setting_kv *settings;
+    int settings_dirty;
 
     /* ---- lifecycle ---- */
     pthread_mutex_t lifecycle_mtx;
@@ -72,6 +84,8 @@ void settings_free_all(msxsession *s);
 /* paths.c (M4) */
 int  paths_init(msxsession *s, const msxsession_paths *p);
 int  paths_provision_fujinet(msxsession *s); /* fills fujinet_* or "" */
+int  mkdir_p(const char *path);
+int  copy_file(const char *src, const char *dst);
 
 /* fujinet_runtime.c (M3) */
 int  fujinet_start(msxsession *s);
