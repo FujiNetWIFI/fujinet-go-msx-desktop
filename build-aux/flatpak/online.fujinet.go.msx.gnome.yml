@@ -259,6 +259,19 @@ modules:
       env:
         # Where the FujiNet build finds the static mbedTLS built above.
         MBEDTLS_ROOT_DIR: /app
+        # openMSX's own Tcl detection (build/libraries.py's TCL class) does
+        # NOT use pkg-config at all -- it looks for a tclConfig.sh under
+        # /usr/local or /usr (its distroRoot fallback for a plain "linux"
+        # platform with no 3rd-party install dir of its own, which is
+        # exactly this build: NEED_3RDPARTY is macOS/Windows only, so
+        # openMSX's own 3RDPARTY_INSTALL_DIR make variable -- and so
+        # probe.py's distroRoot -- is empty here). The tcl module above
+        # installs tclConfig.sh to /app/lib, which that search never
+        # checks, so openMSX's own configure step reported "Tcl: headers
+        # found, link test failed" on a real CI run and failed outright.
+        # TCL_CONFIG is the escape hatch libraries.py itself reads first,
+        # before any distroRoot-based search.
+        TCL_CONFIG: /app/lib
     sources:
       - type: dir
         path: ../..
