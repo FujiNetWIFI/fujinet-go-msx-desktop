@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Three patches:
+Four patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -41,6 +41,19 @@ Three patches:
    at least once every ~20ms regardless of run/broken state; the frame
    hook still covers the (much higher-frequency) normal-running case
    unchanged.
+
+4. src/video/VisibleSurface.cc: SDL_WINDOW_HIDDEN added to the window
+   creation flags. VisibleSurface is openMSX's own native window -- never
+   meant to be shown on any platform here, since every frontend paints its
+   own widget from the frame msx_host.cc publishes via the rotateFrames()
+   hook above, not from this window. On Linux this window is largely moot
+   (msx_host.cc forces SDL's headless EGL "offscreen" driver there, which
+   creates no real window at all), but macOS and Windows have no EGL/
+   offscreen-driver equivalent, so openMSX's own SDLVideoSystem there
+   always creates a REAL window -- confirmed by a real macOS CI run
+   surfacing exactly the gap the original per-platform capture plan
+   anticipated (see msx_host.cc's own comment) but that was never actually
+   implemented: without this patch that real window would be visible.
 
 Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
@@ -182,6 +195,26 @@ def patch_debug_pump_hook(stage_dir: str) -> None:
     print(f"Patched {path}: msxhost_debug_pump() hook in Reactor::run()")
 
 
+def patch_hidden_window(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/video/VisibleSurface.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    old = "\tint flags = SDL_WINDOW_OPENGL;\n"
+    new = (
+        "\t// FujiNet Go MSX (desktop): never show openMSX's own native\n"
+        "\t// window -- see patch-staged-tree.py.\n"
+        "\tint flags = SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN;\n")
+    if new.splitlines()[-1] in text:
+        return  # already patched
+    if old not in text:
+        fail(f"{path}: VisibleSurface window-flags anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old, new, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: SDL_WINDOW_HIDDEN added to window creation flags")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -189,6 +222,7 @@ def main() -> None:
     patch_fujinet_port(stage_dir)
     patch_frame_hook(stage_dir)
     patch_debug_pump_hook(stage_dir)
+    patch_hidden_window(stage_dir)
 
 
 if __name__ == "__main__":

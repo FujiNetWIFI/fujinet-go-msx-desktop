@@ -209,13 +209,36 @@ void openmsx_thread_main() {
     using namespace openmsx;
     msx_thread_setname("msx-openmsx");
 
-    // openMSX renders via GLES2/GL into SDL's "offscreen" headless EGL
-    // pbuffer -- SDLGL-PP is the only real renderer RendererFactory offers
-    // (DummyRenderer produces no frames), and nothing here ever draws to a
+    // openMSX renders via GLES2/GL, and nothing here ever draws to a
     // visible window: every frontend paints its own widget from the frame
     // this host publishes via msxhost_notify_frame(), called from the
-    // patched PostProcessor::rotateFrames() below.
+    // patched PostProcessor::rotateFrames() below. The openMSX-native
+    // window itself (created inside VisibleSurface's constructor, not by
+    // this file) is never meant to be shown to the user on any platform --
+    // see the SDL_WINDOW_HIDDEN patch in patch-staged-tree.py.
+    //
+    // Linux only forces SDL's "offscreen" video driver: a real EGL headless
+    // pbuffer, so there is no window (hidden or otherwise) and no real
+    // display server dependency at all -- validated by the Android sibling
+    // and by this project's own Linux CI, which boots real C-BIOS sessions
+    // on a headless runner with no X/Wayland server. "offscreen" is an
+    // EGL-backed driver with no equivalent on macOS/Windows (Apple removed
+    // EGL from desktop macOS; SDL2 does not build the offscreen backend for
+    // either platform at all) -- forcing it there unconditionally was a
+    // real bug: SDL2 silently falls back to the platform's real driver
+    // (cocoa/windows) regardless of the SDL_HINT_OVERRIDE priority, so the
+    // hint did nothing useful there but was never removed, and a real
+    // macOS CI run's "renderer init failed: Could not create window: Could
+    // not initialize OpenGL / GLES library" surfaced the gap the original
+    // per-platform plan had already anticipated (a hidden real window on
+    // macOS/Windows, vs. Linux's headless EGL pbuffer) but never actually
+    // implemented. macOS/Windows now rely solely on the hidden-window
+    // patch below to stay invisible, using their platform's normal video
+    // driver and a real (if never shown) GL context -- exactly what a
+    // desktop session with a real GPU and window server provides.
+#ifdef __linux__
     SDL_SetHintWithPriority(SDL_HINT_VIDEODRIVER, "offscreen", SDL_HINT_OVERRIDE);
+#endif
     // openMSX's own main.cc normally has SDL_main call SDL_SetMainReady; we
     // boot the Reactor directly, so SDL_InitSubSystem would otherwise refuse
     // to run ("Application didn't initialize properly").
