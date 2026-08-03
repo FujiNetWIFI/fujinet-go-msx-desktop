@@ -11,18 +11,33 @@ name: Flatpak
 # install recipe was confirmed correct end to end locally.
 #
 # --disable-rofiles-fuse: flatpak-builder's default build-time overlay (a
-# FUSE mount layering writes over the read-only cached module install) hits
-# an eu-strip "Permission denied" during its own debuginfo-extraction pass
-# in a plain containerized environment -- confirmed for real on both this
-# session's own dev sandbox AND a genuine GitHub Actions ubuntu-latest run
-# (the first real run of this workflow, before this flag was added), so
-# this is a real, repeatable containerized-CI limitation, not a one-off.
-# The CoCo sibling repo's own already-working flatpak.yml carries the exact
-# same flag for the exact same reason; ported directly rather than
-# rediscovered independently, now that the failure is confirmed identical.
-# (Both manifests also set no-debuginfo: true regardless -- a reasonable
-# production choice on its own merits, avoiding the failing pass' cause
-# entirely for a local flatpak-builder new enough to honor it.)
+# FUSE mount layering writes over the read-only cached module install) was
+# the first suspect for an eu-strip "Permission denied" during flatpak-
+# builder's own debuginfo-extraction pass, confirmed on both this session's
+# dev sandbox and a genuine GitHub Actions ubuntu-latest run. It turned out
+# not to be rofiles-fuse specifically: the identical error persisted with
+# this flag on (confirmed on a second real CI run, writing straight into
+# build-flatpak/files/ with no FUSE mount involved at all), and
+# no-debuginfo: true in both manifests is not recognized by the
+# flatpak-builder version `apt-get install flatpak-builder` pulls on
+# ubuntu-latest (1.4.10 -- "Unknown property no-debuginfo/strip for type
+# BuilderManifest", confirmed locally). Both flags are kept anyway (real
+# fixes on a newer flatpak-builder, and --disable-rofiles-fuse is what the
+# CoCo sibling's own working flatpak.yml already carries), but neither is
+# sufficient here on its own.
+#
+# The actual eu-strip invocation (per flatpak-builder's own
+# builder-post-process.c: `eu-strip --remove-comment --reloc-debug-sections
+# -f <debug> -F <realdebug> <path>`) fails "while opening" <path> -- the
+# module's own already-installed .so, which every earlier step (configure/
+# make/make install) read and wrote without issue -- strongly suggesting
+# eu-strip specifically needs an access mode (in-place read+write) that
+# this containerized runner's sandboxing denies it, not a rofiles-fuse or
+# manifest-property problem as such. A stub eu-strip earlier on PATH sidesteps
+# it entirely: a genuine no-op, so the shipped libraries simply keep their
+# debug symbols (a size/cosmetic difference only, not a functional one --
+# the same outcome no-debuginfo: true would have produced on a
+# flatpak-builder new enough to honor it).
 #
 # No WITH_*_ROMS flag needed here either, matching linux.yml: C-BIOS is
 # bundled unconditionally (see COMPLIANCE.md).
@@ -60,6 +75,18 @@ jobs:
           flatpak install -y --user flathub \
             "${runtime}/x86_64/${runtime_version}" \
             "${sdk}/x86_64/${runtime_version}"
+
+      # See this workflow's own header comment: a genuine no-op standing in
+      # for elfutils' eu-strip, which flatpak-builder's own debuginfo-
+      # extraction pass cannot get past on this runner. /usr/local/bin
+      # already precedes elfutils' /usr/bin on PATH on ubuntu-latest.
+      - name: Work around eu-strip failing under this runner's sandboxing
+        run: |
+          sudo tee /usr/local/bin/eu-strip > /dev/null <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          sudo chmod +x /usr/local/bin/eu-strip
 
       # No --install: building is the check. (Installing would also work,
       # but there is nothing here to run it against on a headless runner.)
