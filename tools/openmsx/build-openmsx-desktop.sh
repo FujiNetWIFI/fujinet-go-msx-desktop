@@ -117,6 +117,21 @@ echo "    archived ${OBJ_COUNT} openMSX objects -> lib/libopenmsx.a"
 if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
     find "${STAGE_DIR}/${DERIVED_DIR}/3rdparty" -name '*.a' \
         -exec cp -a {} "${WORK_OUT}/lib/" \; 2>/dev/null || true
+    # The 3rd-party chain's own install prefix (build/3rdparty.mk:
+    # INSTALL_DIR=$(BUILD_PATH)/install) is where its from-source SDL2/Tcl/
+    # etc headers land -- core/CMakeLists.txt needs SDL2's headers for the
+    # event-injection types msx_host.cc/input_map.c use (SDL_Event, SDLK_*),
+    # and on this platform there is no system SDL2 to pkg-config against
+    # (that is the whole point of building it statically here). Copied
+    # rather than pointed at in place so cmake/OpenMSXRuntime.cmake's
+    # include-path logic has one stable location regardless of the
+    # derived/<platform> directory name.
+    rm -rf "${WORK_OUT}/include/3rdparty"
+    mkdir -p "${WORK_OUT}/include/3rdparty"
+    if [[ -d "${STAGE_DIR}/${DERIVED_DIR}/install/include" ]]; then
+        cp -a "${STAGE_DIR}/${DERIVED_DIR}/install/include/." \
+              "${WORK_OUT}/include/3rdparty/"
+    fi
 fi
 
 # Headers: cmake/OpenMSXRuntime.cmake points msxsession straight at the

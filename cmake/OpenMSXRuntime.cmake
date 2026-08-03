@@ -112,6 +112,19 @@ list(APPEND OPENMSX_INCLUDE_DIRS
 # it always happens after that custom command in the dependency graph.
 file(MAKE_DIRECTORY "${OPENMSX_OUT}/include/openmsx-config")
 
+# macOS/Windows only (NEED_3RDPARTY in build-openmsx-desktop.sh): that
+# script copies the 3rd-party chain's own from-source SDL2/Tcl/etc headers
+# here, since there is no system SDL2 to pkg-config against on those
+# platforms -- core/CMakeLists.txt needs SDL2's headers for msx_host.cc/
+# input_map.c's event-injection types. Same "the path must exist at
+# configure time even though the build hasn't produced its real contents
+# yet" reasoning as openmsx-config above; harmless and unused on Linux,
+# where core/CMakeLists.txt's own pkg_check_modules(sdl2) covers it instead.
+if(NOT _openmsx_target_os STREQUAL "linux")
+  file(MAKE_DIRECTORY "${OPENMSX_OUT}/include/3rdparty")
+  list(APPEND OPENMSX_INCLUDE_DIRS "${OPENMSX_OUT}/include/3rdparty")
+endif()
+
 add_library(openmsx-lib STATIC IMPORTED GLOBAL)
 set_target_properties(openmsx-lib PROPERTIES
   IMPORTED_LOCATION "${OPENMSX_LIB}"

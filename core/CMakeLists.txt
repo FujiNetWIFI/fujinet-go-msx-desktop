@@ -14,7 +14,26 @@ enable_testing()
 # so SDL2 is needed here only for the event-injection types (SDL_Event,
 # SDLK_*) msx_host.cc and input_map.c use to talk to openMSX's own
 # EventDistributor.
-pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+#
+# Linux only: there is a real system SDL2 to pkg-config against (and
+# openMSX itself links it dynamically there -- OpenMSXRuntime.cmake's own
+# Linux-only SYS_DYN block). On macOS/Windows openMSX's 3rd-party chain
+# builds SDL2 from source instead (NEED_3RDPARTY in build-openmsx-
+# desktop.sh); its headers come in transitively through openmsx-lib's own
+# INTERFACE_INCLUDE_DIRECTORIES (see OpenMSXRuntime.cmake), and its symbols
+# through the static archive already attached to openmsx-lib's
+# INTERFACE_LINK_LIBRARIES there -- msxsession needs neither a separate
+# pkg-config lookup nor a separate link target on those platforms. A plain
+# pkg_check_modules(REQUIRED) call here unconditionally would fail
+# configure outright on a machine with no system SDL2 pkg-config module,
+# which is the normal case on macOS/Windows -- caught by the first real
+# macOS CI run, not by local testing (no Mac available; see TODO).
+if(UNIX AND NOT APPLE)
+  pkg_check_modules(SDL2 REQUIRED IMPORTED_TARGET sdl2)
+  set(MSX_SDL2_LINK_LIB PkgConfig::SDL2)
+else()
+  set(MSX_SDL2_LINK_LIB "")
+endif()
 
 add_library(msxsession STATIC
   src/session.c
@@ -29,7 +48,7 @@ add_library(msxsession STATIC
   debugger/debugger.c
   debugger/msxvdpview.c
 )
-target_link_libraries(msxsession PUBLIC openmsx-lib PkgConfig::SDL2 Threads::Threads)
+target_link_libraries(msxsession PUBLIC openmsx-lib ${MSX_SDL2_LINK_LIB} Threads::Threads)
 target_include_directories(msxsession
   PUBLIC "${CMAKE_SOURCE_DIR}/core/include"
   PRIVATE "${CMAKE_SOURCE_DIR}/core/src" "${CMAKE_SOURCE_DIR}/core/openmsx"
