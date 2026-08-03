@@ -185,7 +185,20 @@ modules:
           cp -a /app/lib64/. /app/lib/
           rm -rf /app/lib64
         fi
-      # glew.pc's own template declares "Requires: glu" unconditionally;
+      # glew.h's own #include <GL/glu.h> is gated on the GLEW_NO_GLU macro
+      # (which glew.c's own build already passes to itself, but that does
+      # not propagate to consumers -- glew.pc's Cflags field is what
+      # would). This runtime ships no GL/glu.h at all, so any consumer
+      # that includes <GL/glew.h> without that macro fails to compile with
+      # "GL/glu.h: No such file or directory" -- confirmed by a real CI
+      # failure compiling openMSX's own sources this way (114 objects in,
+      # not a handful -- this only shows up once enough of openMSX has
+      # compiled to reach a file that includes glew.h). Appended to
+      # whatever Cflags the Makefile's own @cflags@ substitution already
+      # produced (empty, in practice) rather than overwriting the line, so
+      # this stays correct even if that upstream default ever changes.
+      - sed -i 's|^Cflags:.*|& -DGLEW_NO_GLU|' glew.pc
+      # glew.pc's own template also declares "Requires: glu" unconditionally;
       # openMSX calls no GLU function, and this runtime does not ship a
       # glu.pc for pkg-config to resolve it against anyway (confirmed by a
       # real failure here: "Package 'glu', required by 'glew', not
