@@ -123,6 +123,16 @@ file(MAKE_DIRECTORY "${OPENMSX_OUT}/include/openmsx-config")
 if(NOT _openmsx_target_os STREQUAL "linux")
   file(MAKE_DIRECTORY "${OPENMSX_OUT}/include/3rdparty")
   list(APPEND OPENMSX_INCLUDE_DIRS "${OPENMSX_OUT}/include/3rdparty")
+  # SDL2's own CMake install layout nests its headers under an SDL2/
+  # subdirectory (.../include/3rdparty/SDL2/SDL.h), not flat -- confirmed
+  # by the first real macOS CI run, which built openMSX's whole static
+  # 3rd-party chain successfully but then failed to compile msxsession's
+  # own input_map.c/msx_host.cc with "SDL.h: file not found" against just
+  # the flat path above. Linux does not need this extra entry: pkg-config
+  # already resolves sdl2's cflags to the equally-specific
+  # /usr/include/SDL2 on its own.
+  file(MAKE_DIRECTORY "${OPENMSX_OUT}/include/3rdparty/SDL2")
+  list(APPEND OPENMSX_INCLUDE_DIRS "${OPENMSX_OUT}/include/3rdparty/SDL2")
 endif()
 
 add_library(openmsx-lib STATIC IMPORTED GLOBAL)
