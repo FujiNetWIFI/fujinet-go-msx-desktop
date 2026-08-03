@@ -316,6 +316,7 @@ def patch_macos_main_thread_window(stage_dir: str) -> None:
         "#include <ranges>\n"
         "#ifdef __APPLE__\n"
         "#include <dispatch/dispatch.h>\n"
+        "#include <exception>\n"
         "#endif\n\n"
         "namespace openmsx {\n")
     if include_anchor not in text:
