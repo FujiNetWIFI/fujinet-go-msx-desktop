@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Seven patches:
+Eight patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -78,31 +78,51 @@ Seven patches:
    there is no known legitimate purpose for this call in this project's
    architecture, on any platform.
 
-6. src/video/VisibleSurface.cc (macOS only): NSWindow and GL-context
-   creation dispatched onto the main thread. This constructor runs on this
-   project's own dedicated openMSX thread like everything else in Reactor,
-   and unlike patches 4-5 (hiding the window, skipping SDL's event poll)
-   there is no way to avoid touching AppKit here at all -- a window has to
-   actually be created for openMSX to render into, even a hidden one.
-   Confirmed by a real macOS CI run (once patches 4-5 above stopped
-   masking it): "renderer init failed: Could not create window: NSWindow
-   should only be instantiated on the main thread!" createSurface() and
-   SDL_GL_CreateContext() are wrapped in a dispatch_sync onto the main
-   queue; a C++ exception thrown inside that block runs on a genuinely
-   different thread's stack even though this one is synchronously
-   blocked, so it cannot simply propagate here -- std::exception_ptr
-   captures it inside the block and rethrows it back on this thread once
-   dispatch_sync returns, preserving the exact "renderer init failed"
-   handling msx_host.cc's own catch (FatalError&) already does. Since
-   SDL_GL_CreateContext implicitly makes the new context current on
-   whichever thread creates it (the main thread here, not this one), it is
-   explicitly re-bound with SDL_GL_MakeCurrent() before returning -- every
-   OpenGL call in the rest of this constructor, and every frame openMSX
-   renders afterward, needs the context current on THIS thread.
+6. src/video/VisibleSurface.cc (macOS only): every NSWindow-mutating call
+   -- construction (createSurface() + SDL_GL_CreateContext()),
+   updateWindowTitle(), resize() and setFullScreen() -- dispatched onto the
+   main thread through one shared helper, msxRunOnMainThread(). This class
+   runs entirely on this project's own dedicated openMSX thread like
+   everything else in Reactor, and unlike patches 4-5 (hiding the window,
+   skipping SDL's event poll) there is no way to avoid touching AppKit
+   here at all -- a window has to actually be created for openMSX to
+   render into, even a hidden one, and its title changes on every machine
+   switch. Found incrementally across two real macOS CI runs, each
+   surfacing the next AppKit main-thread requirement once the previous fix
+   stopped masking it: first "renderer init failed: Could not create
+   window: NSWindow should only be instantiated on the main thread!"
+   (construction), then -- with construction already fixed -- "NSWindow
+   geometry should only be modified on the main thread!" from
+   updateWindowTitle(), triggered by a live machine switch that changes
+   the window title without ever recreating the window. resize() (called
+   on every video-mode change, so this runs constantly during ordinary
+   MSX operation, not just once) and setFullScreen() (never actually
+   reachable from this project's own code, since no fullscreen setting is
+   ever exposed or toggled) are wrapped the same way rather than waiting
+   for a third and fourth real failure to prove each one necessary.
+
+   msxRunOnMainThread checks pthread_main_np() before dispatching:
+   createSurface() itself calls updateWindowTitle() as part of
+   construction, and by the time that inner call happens the constructor
+   has already dispatched onto the main thread -- a nested dispatch_sync
+   from a block already running on the very queue it targets is a
+   textbook deadlock, not a re-entrant no-op. A C++ exception thrown
+   inside a dispatch_sync block runs on a genuinely different thread's
+   stack even though the caller is synchronously blocked, so it cannot
+   simply propagate -- std::exception_ptr captures it inside the block and
+   rethrows it back on the caller's thread once dispatch_sync returns,
+   preserving msx_host.cc's own catch (FatalError&) handling around the
+   constructor call unchanged. Since SDL_GL_CreateContext implicitly makes
+   the new context current on whichever thread creates it (the main
+   thread, during construction), it is explicitly re-bound with
+   SDL_GL_MakeCurrent() afterward -- every OpenGL call in the rest of the
+   constructor, and every frame openMSX renders afterward, needs the
+   context current on the openMSX thread instead.
+
    core/openmsx/msx_host.cc's own msxhost_core_start() is the other half
-   of this fix: without it, the main thread would be parked in a plain
-   condition_variable wait during boot, which never services the main
-   dispatch queue, and this dispatch_sync would block forever.
+   of the construction case: without it, the main thread would be parked
+   in a plain condition_variable wait during boot, which never services
+   the main dispatch queue, and that dispatch_sync would block forever.
 
 7. build/platform-darwin.mk (macOS only): -fblocks added to TARGET_FLAGS.
    Patch 6 above uses Clang's Blocks extension (the `^{ ... }` syntax
@@ -112,6 +132,32 @@ Seven patches:
    invocation, and the cost of being wrong is a wasted CI round-trip for
    something a single explicit flag avoids entirely. Cheap insurance, not
    a response to an observed failure.
+
+8. src/video/VisibleSurface.cc (macOS only): the destructor's window
+   teardown dispatched onto the main thread too, the same way patch 6
+   dispatches its construction. Every real macOS CI run of this project so
+   far, once its own build/link errors were fixed, has ended with several
+   tests crashing right after their own test logic visibly succeeded
+   (boot_smoke printing real non-black rendered frame data;
+   machine_switch_test printing a real "MSX2 booted" line) -- consistent
+   with a crash during session teardown, which happens on every test's
+   clean exit regardless of what the test itself checks. The destructor
+   reads the window's position (getWindowPosition(), itself SDL_
+   GetWindowFlags + SDL_GetWindowPosition) and calls SDL_GL_DeleteContext,
+   then -- after the explicit destructor body finishes -- the `window`
+   member (an SDLWindowPtr, i.e. a unique_ptr-alike with an SDL_
+   DestroyWindow deleter) is torn down implicitly as part of ordinary
+   member destruction, back on the openMSX thread the destructor itself
+   runs on, same as everything else in this class. Explicitly
+   window.reset()'d inside the same msxRunOnMainThread block as the rest
+   of this teardown, so the implicit end-of-scope destruction that would
+   otherwise happen off the main thread becomes a no-op on an
+   already-null pointer. setWindowPosition() (the standalone setter,
+   distinct from the destructor's own read of the getter) is wrapped the
+   same way, for the same "never actually reachable from this project's
+   own code, but cheap to cover" reasoning as setFullScreen() in patch 6 --
+   this project never moves or otherwise manages the hidden window's
+   position.
 
 Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
@@ -307,24 +353,81 @@ def patch_macos_main_thread_window(stage_dir: str) -> None:
     path = f"{stage_dir}/src/video/VisibleSurface.cc"
     with open(path, "r", encoding="utf-8") as f:
         text = f.read()
-    marker = "FujiNet Go MSX (desktop): dispatch window/GL-context creation"
+    marker = "FujiNet Go MSX (desktop): msxRunOnMainThread"
     if marker in text:
         return  # already patched
 
+    # ---- 1. includes + the shared helper -----------------------------------
+    # A real macOS CI run confirmed window *creation* needing the main
+    # thread was only the first of several: a later run (after that fix
+    # landed) crashed identically but from updateWindowTitle() instead
+    # ("NSWindow geometry should only be modified on the main thread!",
+    # during a live machine switch, which changes the window title but
+    # never recreates the window) -- confirming AppKit gates essentially
+    # every NSWindow mutation this way, not just construction. One shared
+    # helper, used at every call site that touches the window's visible
+    # state, avoids finding the rest of these one real CI failure at a
+    # time. It checks pthread_main_np() first rather than dispatch_sync
+    # unconditionally: createSurface() itself calls updateWindowTitle()
+    # (line ~266, original source) as part of construction, and by the
+    # time that inner call happens this project's own constructor patch
+    # below has *already* dispatched onto the main thread -- a nested
+    # dispatch_sync from a block already running on the very queue it
+    # targets is a textbook deadlock, not a re-entrant no-op.
     include_anchor = "#include <ranges>\n\nnamespace openmsx {\n"
     include = (
         "#include <ranges>\n"
         "#ifdef __APPLE__\n"
         "#include <dispatch/dispatch.h>\n"
         "#include <exception>\n"
+        "#include <pthread.h>\n"
         "#endif\n\n"
-        "namespace openmsx {\n")
+        "namespace openmsx {\n"
+        "\n"
+        "#ifdef __APPLE__\n"
+        "namespace {\n"
+        f"// {marker}(fn): runs fn() synchronously on the main thread (or\n"
+        "// inline, if already there) and propagates any C++ exception it\n"
+        "// throws back to the caller -- see patch-staged-tree.py. AppKit\n"
+        "// requires NSWindow creation and every later mutation of its\n"
+        "// visible state (title, size, fullscreen, ...) to happen on the\n"
+        "// main thread; VisibleSurface's constructor and every method\n"
+        "// below that touches the window run on this project's own\n"
+        "// dedicated openMSX thread instead (msx_host.cc), never the main\n"
+        "// one. A C++ exception thrown inside a dispatch_sync block runs\n"
+        "// on a genuinely different thread's stack even though the\n"
+        "// caller is synchronously blocked, so it cannot simply\n"
+        "// propagate -- std::exception_ptr captures it inside the block\n"
+        "// and rethrows it back on the caller's thread once dispatch_sync\n"
+        "// returns.\n"
+        "template<typename F>\n"
+        "void msxRunOnMainThread(F&& fn)\n"
+        "{\n"
+        "\tif (pthread_main_np()) {\n"
+        "\t\tfn();\n"
+        "\t\treturn;\n"
+        "\t}\n"
+        "\t__block std::exception_ptr pendingException;\n"
+        "\tdispatch_sync(dispatch_get_main_queue(), ^{\n"
+        "\t\ttry {\n"
+        "\t\t\tfn();\n"
+        "\t\t} catch (...) {\n"
+        "\t\t\tpendingException = std::current_exception();\n"
+        "\t\t}\n"
+        "\t});\n"
+        "\tif (pendingException) {\n"
+        "\t\tstd::rethrow_exception(pendingException);\n"
+        "\t}\n"
+        "}\n"
+        "} // namespace\n"
+        "#endif\n")
     if include_anchor not in text:
         fail(f"{path}: '#include <ranges>' / 'namespace openmsx {{' anchor "
-             "not found for the dispatch/dispatch.h include")
+             "not found for the msxRunOnMainThread helper")
     text = text.replace(include_anchor, include, 1)
 
-    old = (
+    # ---- 2. constructor: window + GL-context creation -----------------------
+    old_ctor = (
         "\tcreateSurface(size, flags);\n"
         "\tWindowEvent::setMainWindowId(SDL_GetWindowID(window.get()));\n"
         "\n"
@@ -333,31 +436,21 @@ def patch_macos_main_thread_window(stage_dir: str) -> None:
         "\t\tthrow InitException(\n"
         '\t\t\t"Failed to create " VERSION_STRING " context: ", SDL_GetError());\n'
         "\t}\n")
-    new = (
+    new_ctor = (
         "#ifdef __APPLE__\n"
-        f"\t// {marker} -- see\n"
-        "\t// patch-staged-tree.py. NSWindow/GL-context creation requires\n"
-        "\t// the main thread; this constructor always runs on this\n"
-        "\t// project's own dedicated openMSX thread (msx_host.cc), never\n"
-        "\t// the main one, so both calls are dispatched there\n"
-        "\t// synchronously instead.\n"
-        "\t__block std::exception_ptr pendingException;\n"
-        "\tdispatch_sync(dispatch_get_main_queue(), ^{\n"
-        "\t\ttry {\n"
-        "\t\t\tthis->createSurface(size, flags);\n"
-        "\t\t\tWindowEvent::setMainWindowId(SDL_GetWindowID(this->window.get()));\n"
-        "\t\t\tthis->glContext = SDL_GL_CreateContext(this->window.get());\n"
-        "\t\t\tif (!this->glContext) {\n"
-        "\t\t\t\tthrow InitException(\n"
-        '\t\t\t\t\t"Failed to create " VERSION_STRING " context: ", SDL_GetError());\n'
-        "\t\t\t}\n"
-        "\t\t} catch (...) {\n"
-        "\t\t\tpendingException = std::current_exception();\n"
+        "\t// See the msxRunOnMainThread comment above.\n"
+        "\tmsxRunOnMainThread([&] {\n"
+        "#endif\n"
+        "\t\tcreateSurface(size, flags);\n"
+        "\t\tWindowEvent::setMainWindowId(SDL_GetWindowID(window.get()));\n"
+        "\n"
+        "\t\tglContext = SDL_GL_CreateContext(window.get());\n"
+        "\t\tif (!glContext) {\n"
+        "\t\t\tthrow InitException(\n"
+        '\t\t\t\t"Failed to create " VERSION_STRING " context: ", SDL_GetError());\n'
         "\t\t}\n"
+        "#ifdef __APPLE__\n"
         "\t});\n"
-        "\tif (pendingException) {\n"
-        "\t\tstd::rethrow_exception(pendingException);\n"
-        "\t}\n"
         "\t// SDL_GL_CreateContext implicitly makes the new context current\n"
         "\t// on whichever thread creates it (the main thread, above) --\n"
         "\t// every OpenGL call below this point (and every frame openMSX\n"
@@ -367,25 +460,205 @@ def patch_macos_main_thread_window(stage_dir: str) -> None:
         "\t\tthrow InitException(\n"
         '\t\t\t"Failed to make GL context current: ", SDL_GetError());\n'
         "\t}\n"
-        "#else\n"
-        "\tcreateSurface(size, flags);\n"
-        "\tWindowEvent::setMainWindowId(SDL_GetWindowID(window.get()));\n"
-        "\n"
-        "\tglContext = SDL_GL_CreateContext(window.get());\n"
-        "\tif (!glContext) {\n"
-        "\t\tthrow InitException(\n"
-        '\t\t\t"Failed to create " VERSION_STRING " context: ", SDL_GetError());\n'
-        "\t}\n"
         "#endif\n")
-    if old not in text:
+    if old_ctor not in text:
         fail(f"{path}: VisibleSurface window/GL-context creation anchor "
              "not found (openMSX source has drifted from the pinned commit?)")
-    text = text.replace(old, new, 1)
+    text = text.replace(old_ctor, new_ctor, 1)
+
+    # ---- 3. updateWindowTitle(): a live machine switch calls this without ---
+    # ---- ever recreating the window, confirmed fatal by a real CI run ------
+    old_title = (
+        "void VisibleSurface::updateWindowTitle()\n"
+        "{\n"
+        "\tassert(window);\n"
+        "\tSDL_SetWindowTitle(window.get(), getDisplay().getWindowTitle().c_str());\n"
+        "}\n")
+    new_title = (
+        "void VisibleSurface::updateWindowTitle()\n"
+        "{\n"
+        "\tassert(window);\n"
+        "#ifdef __APPLE__\n"
+        "\tmsxRunOnMainThread([&] {\n"
+        "#endif\n"
+        "\t\tSDL_SetWindowTitle(window.get(), getDisplay().getWindowTitle().c_str());\n"
+        "#ifdef __APPLE__\n"
+        "\t});\n"
+        "#endif\n"
+        "}\n")
+    if old_title not in text:
+        fail(f"{path}: VisibleSurface::updateWindowTitle() anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old_title, new_title, 1)
+
+    # ---- 4. resize(): the window is resized on every video-mode change, so --
+    # ---- this runs constantly during ordinary MSX operation, not just once -
+    old_resize = (
+        "void VisibleSurface::resize()\n"
+        "{\n"
+        "\tauto size = display.getWindowSize();\n"
+        "\tSDL_SetWindowSize(window.get(), size.x, size.y);\n"
+        "\n"
+        "\tbool fullScreen = display.getRenderSettings().getFullScreen();\n"
+        "\tsetViewPort(size, fullScreen);\n"
+        "}\n")
+    new_resize = (
+        "void VisibleSurface::resize()\n"
+        "{\n"
+        "\tauto size = display.getWindowSize();\n"
+        "#ifdef __APPLE__\n"
+        "\tmsxRunOnMainThread([&] {\n"
+        "#endif\n"
+        "\t\tSDL_SetWindowSize(window.get(), size.x, size.y);\n"
+        "#ifdef __APPLE__\n"
+        "\t});\n"
+        "#endif\n"
+        "\n"
+        "\tbool fullScreen = display.getRenderSettings().getFullScreen();\n"
+        "\tsetViewPort(size, fullScreen);\n"
+        "}\n")
+    if old_resize not in text:
+        fail(f"{path}: VisibleSurface::resize() anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old_resize, new_resize, 1)
+
+    # ---- 5. setFullScreen(): never actually reachable from this project's ---
+    # ---- own code (no fullscreen setting is ever exposed or toggled), but --
+    # ---- wrapped anyway for the same reason as the rest of this patch ------
+    old_fs = (
+        "bool VisibleSurface::setFullScreen(bool fullscreen)\n"
+        "{\n"
+        "\tauto flags = SDL_GetWindowFlags(window.get());\n"
+        "\t// Note: SDL_WINDOW_FULLSCREEN_DESKTOP also has the SDL_WINDOW_FULLSCREEN\n"
+        "\t//       bit set.\n"
+        "\tif (bool currentState = (flags & SDL_WINDOW_FULLSCREEN) != 0;\n"
+        "\t    currentState == fullscreen) {\n"
+        "\t\t// already wanted stated\n"
+        "\t\treturn true;\n"
+        "\t}\n"
+        "\n"
+        "\tif (SDL_SetWindowFullscreen(window.get(),\n"
+        "\t\t\tfullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {\n"
+        "\t\treturn false; // error, try re-creating the window\n"
+        "\t}\n"
+        "\tfullScreenUpdated(fullscreen);\n"
+        "\treturn true; // success\n"
+        "}\n")
+    new_fs = (
+        "bool VisibleSurface::setFullScreen(bool fullscreen)\n"
+        "{\n"
+        "\tbool alreadySet = false;\n"
+        "\tbool setOk = true;\n"
+        "#ifdef __APPLE__\n"
+        "\tmsxRunOnMainThread([&] {\n"
+        "#endif\n"
+        "\t\tauto flags = SDL_GetWindowFlags(window.get());\n"
+        "\t\t// Note: SDL_WINDOW_FULLSCREEN_DESKTOP also has the SDL_WINDOW_FULLSCREEN\n"
+        "\t\t//       bit set.\n"
+        "\t\tif (bool currentState = (flags & SDL_WINDOW_FULLSCREEN) != 0;\n"
+        "\t\t    currentState == fullscreen) {\n"
+        "\t\t\talreadySet = true; // already wanted state\n"
+        "\t\t} else if (SDL_SetWindowFullscreen(window.get(),\n"
+        "\t\t\t\tfullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0) {\n"
+        "\t\t\tsetOk = false; // error, try re-creating the window\n"
+        "\t\t}\n"
+        "#ifdef __APPLE__\n"
+        "\t});\n"
+        "#endif\n"
+        "\tif (alreadySet) return true;\n"
+        "\tif (!setOk) return false;\n"
+        "\tfullScreenUpdated(fullscreen);\n"
+        "\treturn true; // success\n"
+        "}\n")
+    if old_fs not in text:
+        fail(f"{path}: VisibleSurface::setFullScreen() anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old_fs, new_fs, 1)
 
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
-    print(f"Patched {path}: window/GL-context creation dispatched to the "
-          "main thread on macOS")
+    print(f"Patched {path}: window creation, title, resize and fullscreen "
+          "dispatched to the main thread on macOS")
+
+
+def patch_macos_window_teardown(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/video/VisibleSurface.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "FujiNet Go MSX (desktop): destroy the window here"
+    if marker in text:
+        return  # already patched
+
+    old_dtor = (
+        "\tgl::context.reset();\n"
+        "\tSDL_GL_DeleteContext(glContext);\n"
+        "\n"
+        "\t// store last known position for when we recreate it\n"
+        "\t// the window gets recreated when changing renderers, for instance.\n"
+        "\t// Do not store if we're full screen, the location is the top-left\n"
+        "\tif (auto pos = getWindowPosition()) {\n"
+        "\t\tdisplay.storeWindowPosition(*pos);\n"
+        "\t}\n"
+        "\n"
+        "\tfor (auto type : {EventType::IMGUI_ACTIVE,\n")
+    new_dtor = (
+        "\tgl::context.reset();\n"
+        "#ifdef __APPLE__\n"
+        "\tmsxRunOnMainThread([&] {\n"
+        "#endif\n"
+        "\t\tSDL_GL_DeleteContext(glContext);\n"
+        "\n"
+        "\t\t// store last known position for when we recreate it\n"
+        "\t\t// the window gets recreated when changing renderers, for instance.\n"
+        "\t\t// Do not store if we're full screen, the location is the top-left\n"
+        "\t\tif (auto pos = getWindowPosition()) {\n"
+        "\t\t\tdisplay.storeWindowPosition(*pos);\n"
+        "\t\t}\n"
+        "#ifdef __APPLE__\n"
+        f"\t\t// {marker} -- see patch-staged-tree.py. Without this, `window`\n"
+        "\t\t// (an SDLWindowPtr -- a unique_ptr-alike with an SDL_DestroyWindow\n"
+        "\t\t// deleter) is torn down implicitly as an ordinary member, once this\n"
+        "\t\t// whole function returns -- back on the openMSX thread this\n"
+        "\t\t// destructor itself runs on, same as everything else in this class.\n"
+        "\t\twindow.reset();\n"
+        "#endif\n"
+        "#ifdef __APPLE__\n"
+        "\t});\n"
+        "#endif\n"
+        "\n"
+        "\tfor (auto type : {EventType::IMGUI_ACTIVE,\n")
+    if old_dtor not in text:
+        fail(f"{path}: VisibleSurface::~VisibleSurface() teardown anchor "
+             "not found (openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old_dtor, new_dtor, 1)
+
+    old_setpos = (
+        "void VisibleSurface::setWindowPosition(gl::ivec2 pos)\n"
+        "{\n"
+        "\tif (SDL_GetWindowFlags(window.get()) & SDL_WINDOW_FULLSCREEN) return;\n"
+        "\tSDL_SetWindowPosition(window.get(), pos.x, pos.y);\n"
+        "}\n")
+    new_setpos = (
+        "void VisibleSurface::setWindowPosition(gl::ivec2 pos)\n"
+        "{\n"
+        "#ifdef __APPLE__\n"
+        "\tmsxRunOnMainThread([&] {\n"
+        "#endif\n"
+        "\t\tif (SDL_GetWindowFlags(window.get()) & SDL_WINDOW_FULLSCREEN) return;\n"
+        "\t\tSDL_SetWindowPosition(window.get(), pos.x, pos.y);\n"
+        "#ifdef __APPLE__\n"
+        "\t});\n"
+        "#endif\n"
+        "}\n")
+    if old_setpos not in text:
+        fail(f"{path}: VisibleSurface::setWindowPosition() anchor not found "
+             "(openMSX source has drifted from the pinned commit?)")
+    text = text.replace(old_setpos, new_setpos, 1)
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: window teardown dispatched to the main thread "
+          "on macOS")
 
 
 def patch_darwin_blocks_flag(stage_dir: str) -> None:
@@ -430,6 +703,7 @@ def main() -> None:
     patch_hidden_window(stage_dir)
     patch_disable_input_poll(stage_dir)
     patch_macos_main_thread_window(stage_dir)
+    patch_macos_window_teardown(stage_dir)
     patch_darwin_blocks_flag(stage_dir)
 
 
