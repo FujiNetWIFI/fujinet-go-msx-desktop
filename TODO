@@ -653,15 +653,90 @@ windows.yml, then flatpak.yml.
     first -- untested so far" note has said since the very first
     milestone.
 
-  NOT yet done in M7: flatpak.yml, and the build-aux/flatpak/online.
-  fujinet.go.msx.{gnome,kde}.yml manifests it depends on (which do not
-  exist yet -- unlike the CI workflows above, a flatpak manifest is a
-  from-scratch artifact needing every dependency module (tcl, sdl2,
-  sdl2_ttf, freetype, libpng, glew, libogg, libvorbis, libtheora, zlib,
-  plus FujiNet's own mbedtls/libssh/libsmb2/libnfs/expat/cjson) declared
-  with correct sources and hashes -- real, separate work, deliberately
-  not rushed alongside the three CI workflows above. Next concrete step
-  for M7.
+Second pass -- the repo now has a real GitHub remote
+(github.com/FujiNetWIFI/fujinet-go-msx-desktop) and every commit from here
+on is pushed and exercised by real CI, not just local rebuilds. This
+caught FOUR real bugs the local-only verification loop had missed --
+worth recording in detail since they are exactly the kind of platform-
+specific gap a single Linux dev machine cannot see on its own:
+
+  1. core/CMakeLists.txt's SDL2 pkg-config lookup was unconditional
+     (REQUIRED), which only worked on Linux by coincidence (a system SDL2
+     package exists there). Both macOS and Windows CI failed configure
+     outright with "Package 'sdl2' not found" on the very first push.
+     Fixed: the lookup (and its link target) is now Linux-only; macOS/
+     Windows get SDL2's headers transitively through openmsx-lib's own
+     INTERFACE_INCLUDE_DIRECTORIES (exposing the 3rd-party chain's own
+     install/include, which build-openmsx-desktop.sh now copies into
+     tools/openmsx/work/out/include/3rdparty) and its symbols through the
+     static archive already attached to openmsx-lib's own
+     INTERFACE_LINK_LIBRARIES.
+  2. cmake/OpenMSXRuntime.cmake's Tcl detection only find_library()'d
+     libtcl -- tcl.h itself was never explicitly searched for, relying on
+     it sitting on the default include path (true on the maintainer's dev
+     machine purely by chance: tcl.h happens to live straight in
+     /usr/include there). Caught proactively (found by reasoning about
+     the flatpak sandbox case, then confirmed for real by the very next
+     Linux CI run before the fix even landed) -- Ubuntu's tcl-dev package
+     apparently does keep tcl.h unversioned too, so this specific distro
+     was not actually at risk, but the fix (explicit find_path with
+     PATH_SUFFIXES tcl8.6/tcl) is needed regardless for the flatpak
+     sandbox, where a from-source Tcl module's /app/include is never on
+     any default path.
+  3. SDL2's own CMake install layout nests headers under an SDL2/
+     subdirectory (.../include/SDL2/SDL.h), not flat. The first real
+     macOS CI run got all the way through building openMSX's entire
+     static 3rd-party chain AND the FujiNet firmware successfully, then
+     failed compiling msxsession's own input_map.c/msx_host.cc with
+     "SDL.h: file not found" -- Linux never hit this because pkg-config's
+     sdl2 cflags already resolve to the equally-specific /usr/include/SDL2
+     on their own. Fixed by also exposing .../include/3rdparty/SDL2 on
+     openmsx-lib's include dirs for the non-Linux platforms.
+  4. core/tests/vdp_test.c's VRAM-poke-roundtrip check wrote a byte into
+     physical VRAM and read it back through a fresh snapshot while C-BIOS
+     was still running, unpaused -- a genuine race against the actively-
+     running MSX boot code, which can (and, on the GitHub Actions Linux
+     runner, did) overwrite the poked address before the snapshot
+     captured it. Passed reliably on the maintainer's own dev machine
+     purely by luck of instruction timing. Fixed by pausing the debugger
+     around the poke+snapshot, confirmed stable across repeated local
+     runs afterward.
+
+  Status as of this writing: Linux CI is green (8/8 tests). macOS CI
+  progressed from "fails at configure" through "openMSX + FujiNet both
+  build, msxsession fails on a missing header" to (pending the SDL2-
+  subdirectory fix's own CI run) hopefully further still -- each push
+  has moved the failure point later, which is the real signal that the
+  underlying approach is sound and the remaining gaps are narrow, fixable
+  ones rather than a fundamentally wrong platform strategy. Windows CI
+  hit two DIFFERENT problems on two different runs of openMSX's own
+  vendored 3rd-party chain (a real compile bug -- pkg-config 0.29.2's
+  bundled glib fork uses `bool` as a struct member name, which a modern
+  MinGW GCC rejects -- on one run, and what looks like a transient
+  download-truncation network flake on another) -- genuinely deep
+  upstream/toolchain territory, not something to chase further without a
+  real Windows box; left as an open, honestly-stated gap for M9.
+
+  flatpak.yml + build-aux/flatpak/online.fujinet.go.msx.{gnome,kde}.yml
+  are now written. Every declared source (openMSX's seven from-source
+  dependencies -- tcl, sdl2, sdl2_ttf, libogg, libvorbis, libtheora, glew
+  -- plus mbedtls and the FujiNet web UI's Python deps) was downloaded for
+  real and its SHA256 verified against the actual file (most of the
+  first-guess hashes written before verification were wrong, confirming
+  why this step matters), and the tcl module's full autotools build+
+  install recipe was confirmed correct end to end with a real local
+  flatpak-builder run -- every step succeeded through "Recording license
+  file license.terms". flatpak-builder's own final debuginfo-extraction
+  pass then failed with an eu-strip permission error that reproduced
+  identically in a bare /tmp directory outside the repo and persisted
+  across several variations tried -- strong evidence of a nested-
+  sandboxing artifact specific to this development session's own execution
+  environment (confirmed running with zero effective Linux capabilities),
+  not a defect in the manifest. Both manifests now set no-debuginfo: true
+  regardless (a reasonable production choice on its own merits, and it
+  also sidesteps the failing step's cause entirely). The real, final
+  verification is flatpak.yml's own first CI run on a normal GitHub
+  Actions runner.
 
 Then, in order (M8-M9)
 -----------------------

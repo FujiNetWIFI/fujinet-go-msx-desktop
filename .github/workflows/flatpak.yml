@@ -1,0 +1,63 @@
+name: Flatpak
+
+# Last of the M7 CI jobs (see TODO). Builds both flatpak manifests
+# (build-aux/flatpak/online.fujinet.go.msx.{gnome,kde}.yml) with
+# flatpak-builder against the real GNOME/KDE runtimes pulled from Flathub.
+#
+# Every declared source (openMSX's seven from-source dependencies -- tcl,
+# sdl2, sdl2_ttf, libogg, libvorbis, libtheora, glew -- plus mbedtls and the
+# FujiNet web UI's Python deps) was downloaded and its SHA256 verified for
+# real while writing these manifests, and the tcl module's full build+
+# install recipe was confirmed correct end to end locally. The final
+# flatpak-builder finalization step (its own debuginfo-extraction pass) did
+# not complete in the local development sandbox used to write this
+# (an eu-strip/rofiles-fuse permission error that reproduced identically
+# in a plain /tmp directory outside the repo, strongly suggesting a nested-
+# sandboxing artifact of that specific environment rather than a manifest
+# defect -- both manifests now also set no-debuginfo: true, which avoids
+# the failing step entirely regardless of its cause). This workflow running
+# on a normal GitHub Actions runner is the first full, unencumbered
+# verification.
+#
+# No WITH_*_ROMS flag needed here either, matching linux.yml: C-BIOS is
+# bundled unconditionally (see COMPLIANCE.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        manifest:
+          - build-aux/flatpak/online.fujinet.go.msx.gnome.yml
+          - build-aux/flatpak/online.fujinet.go.msx.kde.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install flatpak and flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --if-not-exists --user flathub \
+            https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install the runtime and SDK this manifest targets
+        run: |
+          runtime=$(sed -n 's/^runtime: *//p' "${{ matrix.manifest }}")
+          runtime_version=$(sed -n "s/^runtime-version: *'\(.*\)'/\1/p" "${{ matrix.manifest }}")
+          sdk=$(sed -n 's/^sdk: *//p' "${{ matrix.manifest }}")
+          flatpak install -y --user flathub \
+            "${runtime}/x86_64/${runtime_version}" \
+            "${sdk}/x86_64/${runtime_version}"
+
+      # No --install: building is the check. (Installing would also work,
+      # but there is nothing here to run it against on a headless runner.)
+      - name: Build
+        run: |
+          flatpak-builder --user --force-clean build-flatpak "${{ matrix.manifest }}"
