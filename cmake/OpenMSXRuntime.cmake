@@ -69,31 +69,48 @@ add_custom_target(openmsx-build-refresh
   USES_TERMINAL
   VERBATIM)
 
-# The include path list is written by build-openmsx-desktop.sh from openMSX's
-# own SOURCE_DIRS logic (every subdirectory of src, sorted) so a future
-# openMSX version that adds a subdirectory does not silently break the build.
-# It only exists after the first build, which is fine: this file is read at
-# *generate* time for a target that already depends on openmsx-build, and a
-# from-scratch configure re-runs generation once the custom command has run.
+# The per-subdirectory include path list is computed here, at *configure*
+# time, straight from the staged source tree (core/openmsx-generated/src --
+# StageOpenMSX.cmake has already populated it by the time this file runs),
+# mirroring openMSX's own SOURCE_DIRS logic (build/main.mk:260: every
+# subdirectory of src, sorted) so a future openMSX version that adds a
+# subdirectory does not silently break the build.
+#
+# This *must* come from the staged tree, not a file build-openmsx-desktop.sh
+# writes during the build: a target's INTERFACE_INCLUDE_DIRECTORIES is baked
+# into build.ninja at generate time, which happens once per `cmake -B build`
+# invocation and is never revisited just because a later `cmake --build`
+# step produces a new file. A from-scratch clone's first configure would
+# otherwise permanently bake in an empty subdirectory list (only the two
+# fallback entries below), because no build has run yet to write it -- a
+# real bug this comment used to (wrongly) claim CMake reconfigures around;
+# the clean-clone gate test in TODO caught it. Globbing the staged source
+# instead needs no such build-then-reconfigure dance, since the directories
+# being listed already exist at configure time.
+file(GLOB_RECURSE _openmsx_src_dirs LIST_DIRECTORIES true
+     "${OPENMSX_GEN}/src/*")
 set(OPENMSX_INCLUDE_DIRS "")
-if(EXISTS "${OPENMSX_OUT}/include-dirs.txt")
-  file(STRINGS "${OPENMSX_OUT}/include-dirs.txt" _openmsx_subdirs)
-  foreach(_d IN LISTS _openmsx_subdirs)
-    list(APPEND OPENMSX_INCLUDE_DIRS "${OPENMSX_OUT}/include/openmsx/${_d}")
-  endforeach()
-endif()
+foreach(_d IN LISTS _openmsx_src_dirs)
+  if(IS_DIRECTORY "${_d}")
+    list(APPEND OPENMSX_INCLUDE_DIRS "${_d}")
+  endif()
+endforeach()
 list(APPEND OPENMSX_INCLUDE_DIRS
-     "${OPENMSX_OUT}/include/openmsx"
+     "${OPENMSX_GEN}/src"
      "${OPENMSX_OUT}/include/openmsx-config")
 
-# CMake fatally errors on an IMPORTED target's INTERFACE_INCLUDE_DIRECTORIES
-# containing a path that does not yet exist. Before the first build these
-# directories are exactly that (build-openmsx-desktop.sh creates them), so
-# create them empty now -- the standard ExternalProject_Add-style workaround.
-# The real headers land inside them once the custom command below runs.
-foreach(_d IN LISTS OPENMSX_INCLUDE_DIRS)
-  file(MAKE_DIRECTORY "${_d}")
-endforeach()
+# The generated config headers (components.hh, build-info.hh, ...) are
+# genuinely build-time output (platform+flavour specific, written by
+# build-openmsx-desktop.sh from derived/<platform>/config once it knows
+# which platform it built for) -- unlike the subdirectory list above, this
+# one path cannot be known from the staged source alone. CMake fatally
+# errors on an IMPORTED target's INTERFACE_INCLUDE_DIRECTORIES containing a
+# path that does not yet exist, so create it empty now (the standard
+# ExternalProject_Add-style workaround); the real headers land inside once
+# the custom command below runs, which is fine -- only the *path* needs to
+# exist at configure time, not populated contents, since compiling against
+# it always happens after that custom command in the dependency graph.
+file(MAKE_DIRECTORY "${OPENMSX_OUT}/include/openmsx-config")
 
 add_library(openmsx-lib STATIC IMPORTED GLOBAL)
 set_target_properties(openmsx-lib PROPERTIES

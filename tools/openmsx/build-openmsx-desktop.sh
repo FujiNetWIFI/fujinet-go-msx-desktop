@@ -14,16 +14,19 @@
 #                           frontends provide main()), archived
 #   lib/*.a                 3rd-party static archives (macOS/Windows only;
 #                           Linux links the system copies dynamically)
-#   include/openmsx/        the full staged src/ tree (headers + .cc, mirrors
-#                           what openMSX's own build compiles against)
 #   include/openmsx-config/ the generated config headers (components.hh,
-#                           build-info.hh, ...) for this platform+flavour
-#   include-dirs.txt        one -I path per line (relative to include/),
-#                           computed the same way openMSX's own
-#                           SOURCE_DIRS := $(sort $(shell find src -type d))
-#                           does, so core/CMakeLists.txt can point our own
-#                           sources at every subdirectory openMSX itself
-#                           would -- without hand-maintaining that list
+#                           build-info.hh, ...) for this platform+flavour --
+#                           the only headers actually copied here. The rest
+#                           of the include path (every subdirectory of
+#                           openMSX's own src/) is pointed by
+#                           cmake/OpenMSXRuntime.cmake straight at the
+#                           staged tree (core/openmsx-generated/src, the
+#                           same headers these objects were compiled
+#                           against), computed at *configure* time so a
+#                           truly fresh clone's first configure sees the
+#                           real list -- not a file only this build-time
+#                           script could have written. See that file's
+#                           comment for the clean-clone bug this replaced.
 #   share/                  the runtime tree (init.tcl, scripts/, machines/
 #                           incl. C-BIOS, extensions/ incl. FujiNet.xml)
 #
@@ -116,20 +119,13 @@ if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
         -exec cp -a {} "${WORK_OUT}/lib/" \; 2>/dev/null || true
 fi
 
-# Headers: the full staged src/ tree (openMSX's own includes are flat across
-# every subdirectory, so nothing here is pruned) plus the generated config
-# headers for this exact platform+flavour build.
-rm -rf "${WORK_OUT}/include/openmsx"
-cp -a "${STAGE_DIR}/src" "${WORK_OUT}/include/openmsx"
+# Headers: cmake/OpenMSXRuntime.cmake points msxsession straight at the
+# staged tree (core/openmsx-generated/src -- the same headers these objects
+# were compiled against, so there is no separate copy that could drift), by
+# globbing its subdirectories at *configure* time. Only the generated config
+# headers are genuinely build-time output (platform+flavour specific) and
+# copied here.
 cp -a "${STAGE_DIR}/${DERIVED_DIR}/config/." "${WORK_OUT}/include/openmsx-config/"
-
-# The include-path list our own CMake needs, computed exactly the way
-# openMSX's own build computes SOURCE_DIRS (build/main.mk:260) -- every
-# directory under src, sorted, so a future openMSX version that adds a
-# subdirectory does not silently break our include path.
-( cd "${WORK_OUT}/include/openmsx" && find . -type d | sed 's#^\./##' | sort ) \
-    > "${WORK_OUT}/include-dirs.txt"
-echo "    wrote include-dirs.txt ($(wc -l < "${WORK_OUT}/include-dirs.txt") entries)"
 
 # Runtime share tree: openMSX boots by executing <systemdatadir>/init.tcl,
 # which pulls in share/scripts/*; a subset fails with "Couldn't find
