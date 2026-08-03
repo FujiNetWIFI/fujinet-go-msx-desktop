@@ -16,18 +16,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "msxsession.h"
 #include "msx_host.hh"
-
-static void sleep_ms(int ms)
-{
-    struct timespec ts;
-    ts.tv_sec = ms / 1000;
-    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
-    nanosleep(&ts, NULL);
-}
+#include "test_sleep.h"
 
 int main(void)
 {

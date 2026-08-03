@@ -27,17 +27,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "msxsession.h"
-
-static void sleep_ms(int ms)
-{
-    struct timespec ts;
-    ts.tv_sec = ms / 1000;
-    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
-    nanosleep(&ts, NULL);
-}
+#include "test_sleep.h"
 
 /* 'c' is ASCII 0x63 -- an X11 keysym and an SDL keycode in one, per
  * core/src/input_map.c's Latin-1 passthrough. */
