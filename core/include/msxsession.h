@@ -103,10 +103,10 @@ void        msxsession_settings_flush(msxsession *s);
 #define MSXSESSION_MACHINE_MSX2P  "C-BIOS_MSX2+"
 
 /* ---- lifecycle ------------------------------------------------------------
- * opts is minimal for M2 (a machine id); FujiNet enable, audio (n/a, see
- * above) and joystick enable join it in M3/M4. */
+ * Joystick enable joins this in M4 (audio is n/a -- see above). */
 typedef struct {
     const char *machine; /* an MSXSESSION_MACHINE_* id, or a profile id (M4) */
+    int enable_fujinet;  /* start the in-process FujiNet runtime */
 } msxsession_start_opts;
 
 /* Fills opts from the settings store (default: C-BIOS MSX2). */

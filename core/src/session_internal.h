@@ -28,6 +28,7 @@ struct msxsession {
     char roms_dir[MSX_PATH_MAX];   /* imported turboR/real-machine ROMs (M4) */
     char carts_dir[MSX_PATH_MAX];  /* imported cartridge images (M4) */
     char fujinet_lib[MSX_PATH_MAX];   /* "" = unavailable/disabled (M3) */
+    char fujinet_src[MSX_PATH_MAX];   /* provisioning source override */
     char fujinet_root[MSX_PATH_MAX];
     char fujinet_config[MSX_PATH_MAX];
     char fujinet_sd[MSX_PATH_MAX];

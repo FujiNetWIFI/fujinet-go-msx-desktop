@@ -17,7 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include "compat.h"
 #include "msx_host.hh"
@@ -34,54 +33,6 @@ void session_set_error(msxsession *s, const char *fmt, ...)
     vsnprintf(s->last_error, sizeof(s->last_error), fmt, ap);
     va_end(ap);
     fprintf(stderr, "msxsession: %s\n", s->last_error);
-}
-
-static int dir_has_file(const char *dir, const char *file)
-{
-    char path[MSX_PATH_MAX];
-    struct stat st;
-    snprintf(path, sizeof(path), "%s/%s", dir, file);
-    return stat(path, &st) == 0;
-}
-
-/* Resolves the openMSX runtime share tree openMSX boots from
- * (OPENMSX_SYSTEM_DATA): init.tcl + scripts/ + machines/ (incl. C-BIOS) +
- * extensions/ (incl. FujiNet.xml + fujinet-config.rom). Search order:
- * caller override, $MSX_OPENMSX_SHARE, the executable's own directory (a
- * packaged install lays "share/" beside the binary), the install datadir
- * baked in at configure time, then the dev build's raw output
- * (tools/openmsx/work/out/share). A fuller paths.c (XDG dirs, ROM
- * materialisation) lands in M4; this is deliberately self-contained until
- * then. */
-static int resolve_openmsx_share(msxsession *s, const char *override_dir)
-{
-    const char *env;
-    const char *candidates[4];
-    int n = 0;
-
-    if (override_dir && *override_dir) {
-        snprintf(s->openmsx_share, sizeof(s->openmsx_share), "%s",
-                 override_dir);
-        if (dir_has_file(s->openmsx_share, "init.tcl")) return 0;
-    }
-
-    env = getenv("MSX_OPENMSX_SHARE");
-    if (env && *env) candidates[n++] = env;
-#ifdef MSX_INSTALL_DATADIR_SHARE
-    candidates[n++] = MSX_INSTALL_DATADIR_SHARE;
-#endif
-#ifdef MSX_DEV_OPENMSX_SHARE
-    candidates[n++] = MSX_DEV_OPENMSX_SHARE;
-#endif
-
-    for (int i = 0; i < n; i++) {
-        if (dir_has_file(candidates[i], "init.tcl")) {
-            snprintf(s->openmsx_share, sizeof(s->openmsx_share), "%s",
-                     candidates[i]);
-            return 0;
-        }
-    }
-    return -1;
 }
 
 /****************************************************************************/
@@ -168,11 +119,7 @@ msxsession *msxsession_new(const msxsession_paths *paths)
         return NULL;
     }
 
-    if (resolve_openmsx_share(s, paths ? paths->openmsx_share : NULL) != 0) {
-        session_set_error(s,
-            "Could not find the openMSX runtime share tree (init.tcl). "
-            "Set MSX_OPENMSX_SHARE, or build tools/openmsx/"
-            "build-openmsx-desktop.sh first for a dev checkout.");
+    if (paths_init(s, paths) != 0) {
         free(s->frame);
         free(s);
         return NULL;
@@ -201,6 +148,7 @@ void msxsession_default_opts(msxsession *s, msxsession_start_opts *opts)
     (void)s;
     memset(opts, 0, sizeof(*opts));
     opts->machine = MSXSESSION_MACHINE_MSX2;
+    opts->enable_fujinet = 1;
 }
 
 int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
@@ -229,6 +177,19 @@ int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
         }
     }
 
+    /* FUJINET MUST BE UP BEFORE OPENMSX.
+     *
+     * Same reasoning as the CoCo port, and the opposite of ADAM/Apple II:
+     * here FujiNet is the BOIP server and openMSX's FujiNet cartridge
+     * device connects *out* to it. Waiting for the listener to actually
+     * accept (rather than just returning from fujinet_start) avoids losing
+     * the first seconds of the link to BoIPChannel's own suspend-before-
+     * listen delay -- see fujinet_runtime.c. A missing or broken runtime is
+     * not fatal: the machine still boots, just without FujiNet, and
+     * openMSX's own connect loop keeps retrying regardless. */
+    if (opts->enable_fujinet && fujinet_start(s) == 0)
+        fujinet_wait_for_boip(s, 10000);
+
     msxhost_set_frame_sink(on_core_frame, s);
     msxhost_select_machine(s->cur_machine);
 
@@ -237,6 +198,7 @@ int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
     if (!msxhost_core_start()) {
         session_set_error(s, "%s", msxhost_last_error());
         msxhost_set_frame_sink(NULL, NULL);
+        fujinet_stop(s);
         pthread_mutex_unlock(&s->lifecycle_mtx);
         return -1;
     }
@@ -255,6 +217,7 @@ void msxsession_stop(msxsession *s)
     }
     msxhost_core_stop();
     msxhost_set_frame_sink(NULL, NULL);
+    fujinet_stop(s);
     s->running = 0;
     pthread_mutex_unlock(&s->lifecycle_mtx);
 }
@@ -312,4 +275,9 @@ const char *msxsession_fujinet_webui_url(const msxsession *s)
 int msxsession_fujinet_running(const msxsession *s)
 {
     return s->fujinet_running;
+}
+
+int msxsession_fujinet_copy_log(msxsession *s, char *dst, int max)
+{
+    return fujinet_copy_log(s, dst, max);
 }
