@@ -76,12 +76,16 @@ int main(void)
     }
 
     if (!msxsession_fujinet_running(s)) {
-        fprintf(stderr, "fujinet_smoke: FujiNet runtime did not start "
-                        "(libfujinet.so not built? run "
-                        "tools/fujinet/build-fujinet-desktop.sh)\n");
+        /* Genuinely unavailable (a WITH_FUJINET=OFF build, or libfujinet.so
+         * missing from a dev tree that hasn't run
+         * tools/fujinet/build-fujinet-desktop.sh yet) is an environment
+         * fact, not a bug -- skip (ctest 77), same shape as boot_smoke
+         * skipping on a build with no system ROMs compiled in. */
+        printf("fujinet_smoke: FujiNet runtime did not start (not built?); "
+              "skipping\n");
         msxsession_stop(s);
         msxsession_free(s);
-        return 1;
+        return 77;
     }
 
     fb = malloc((size_t)MSXSESSION_FB_WIDTH * MSXSESSION_FB_HEIGHT *

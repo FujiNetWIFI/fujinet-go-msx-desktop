@@ -71,16 +71,27 @@ target_link_libraries(boot_smoke PRIVATE msxsession)
 add_test(NAME boot_smoke COMMAND boot_smoke)
 set_tests_properties(boot_smoke PROPERTIES TIMEOUT 60)
 
-# M3 gate: with the FujiNet runtime built (WITH_FUJINET=ON, the default),
-# boots openMSX, injects 'c' the way the on-screen/hardware keyboard would,
-# and confirms a real TCP connection comes up on MSXSESSION_BOIP_PORT --
-# proof the whole chain (session -> FujiNet dlopen -> BOIP listener ->
-# openMSX's FujiNet cartridge device connecting out) works headless, without
-# needing a display or a human to press a key and look at a screen.
-if(WITH_FUJINET)
-  add_executable(fujinet_smoke tests/fujinet_smoke.c)
-  target_link_libraries(fujinet_smoke PRIVATE msxsession)
-  add_test(NAME fujinet_smoke COMMAND fujinet_smoke)
-  set_tests_properties(fujinet_smoke PROPERTIES TIMEOUT 60)
-  add_dependencies(fujinet_smoke fujinet-runtime)
-endif()
+# M3 gate: boots openMSX with FujiNet enabled and confirms a real TCP
+# connection comes up on MSXSESSION_BOIP_PORT -- proof the whole chain
+# (session -> FujiNet dlopen -> BOIP listener -> openMSX's FujiNet
+# cartridge device connecting out) works headless, without needing a
+# display or a human to press a key and look at a screen. Exits 77 (ctest
+# SKIP) when the FujiNet runtime isn't available, same shape as boot_smoke
+# skipping on a ROM-less build -- see fujinet_smoke.c.
+#
+# NOT gated on `if(WITH_FUJINET)` here: that option is declared in
+# cmake/FujiNetRuntime.cmake, which the top-level CMakeLists.txt includes
+# *after* add_subdirectory(core) (so the FujiNet runtime can depend on
+# targets core/ defines) -- so WITH_FUJINET does not exist yet at this
+# point in the tree and reads as unset/false, silently skipping this
+# test's registration even on a WITH_FUJINET=ON build. A real clean-clone
+# test run caught this; CoCo's sibling repo already avoids it by never
+# conditioning its own drivewire_smoke registration this way either.
+add_executable(fujinet_smoke tests/fujinet_smoke.c)
+target_link_libraries(fujinet_smoke PRIVATE msxsession)
+add_test(NAME fujinet_smoke COMMAND fujinet_smoke)
+set_tests_properties(fujinet_smoke PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+# Forward-references the target cmake/FujiNetRuntime.cmake defines later in
+# this same configure pass; valid because add_dependencies() only needs the
+# named target to exist by *generate* time, not at the point of this call.
+add_dependencies(fujinet_smoke fujinet-runtime)
