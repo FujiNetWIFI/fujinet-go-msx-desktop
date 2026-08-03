@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+#
+# Build openMSX from the already-staged-and-patched tree
+# (core/openmsx-generated, produced by cmake/StageOpenMSX.cmake) into a
+# static archive this project links, using openMSX's own GNUmakefile rather
+# than reinventing its build. See COMPLIANCE.md and TODO for why.
+#
+# Invoked by cmake/OpenMSXRuntime.cmake, always through bash by name (never
+# as a bare .sh -- MSYS2 cmake cannot execute_process() a script; the same
+# reason tools/fujinet/build-fujinet-desktop.sh is invoked this way).
+#
+# Outputs, under tools/openmsx/work/out/:
+#   lib/libopenmsx.a       every openMSX object except main.o (our own
+#                           frontends provide main()), archived
+#   lib/*.a                 3rd-party static archives (macOS/Windows only;
+#                           Linux links the system copies dynamically)
+#   include/openmsx/        the full staged src/ tree (headers + .cc, mirrors
+#                           what openMSX's own build compiles against)
+#   include/openmsx-config/ the generated config headers (components.hh,
+#                           build-info.hh, ...) for this platform+flavour
+#   include-dirs.txt        one -I path per line (relative to include/),
+#                           computed the same way openMSX's own
+#                           SOURCE_DIRS := $(sort $(shell find src -type d))
+#                           does, so core/CMakeLists.txt can point our own
+#                           sources at every subdirectory openMSX itself
+#                           would -- without hand-maintaining that list
+#   share/                  the runtime tree (init.tcl, scripts/, machines/
+#                           incl. C-BIOS, extensions/ incl. FujiNet.xml)
+#
+# Usage: OPENMSX_TARGET_OS=linux|darwin|mingw-w64 bash build-openmsx-desktop.sh
+
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
+PROJECT_ROOT=$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)
+STAGE_DIR="${PROJECT_ROOT}/core/openmsx-generated"
+WORK_OUT="${PROJECT_ROOT}/tools/openmsx/work/out"
+
+fail() { echo "build-openmsx-desktop.sh: $*" >&2; exit 1; }
+
+[[ -f "${STAGE_DIR}/src/main.cc" ]] || fail \
+  "staged openMSX tree not found at ${STAGE_DIR} -- cmake/StageOpenMSX.cmake should have produced it"
+
+# OS: explicit env var, else openMSX's own autodetection (build/detectsys.py)
+# is left to run by not passing OPENMSX_TARGET_OS at all. CPU is always left
+# to autodetect -- the only reason to pin OS here is that this is a desktop
+# port targeting exactly three, named per PORTING.md's per-target table.
+TARGET_OS="${OPENMSX_TARGET_OS:-}"
+case "${TARGET_OS}" in
+  linux|darwin|mingw-w64|"") ;;
+  *) fail "OPENMSX_TARGET_OS must be linux, darwin or mingw-w64 (got: ${TARGET_OS})" ;;
+esac
+
+# Static 3rd-party linking (Tcl/SDL2/SDL2_ttf/freetype/libpng/zlib/ogg/
+# vorbis/theora/GLEW built from source, statically) is what makes the macOS
+# `otool -L` and Windows `objdump -p` self-containment checks pass -- see
+# PORTING.md. Linux links the distribution's own copies dynamically, same as
+# every other frontend package in this family (CPACK_DEBIAN_PACKAGE_SHLIBDEPS
+# already declares those as real package dependencies).
+NEED_3RDPARTY=0
+case "${TARGET_OS}" in
+  darwin|mingw-w64) NEED_3RDPARTY=1 ;;
+esac
+
+JOBS="${OPENMSX_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+
+MAKE_VARS=(OPENMSX_FLAVOUR=opt PYTHON=python3)
+[[ -n "${TARGET_OS}" ]] && MAKE_VARS+=(OPENMSX_TARGET_OS="${TARGET_OS}")
+if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
+    MAKE_VARS+=(3RDPARTY_FLAG=true)
+fi
+
+pushd "${STAGE_DIR}" >/dev/null
+
+if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
+    echo "==> Building openMSX's static 3rd-party stack (this takes a while the first time)"
+    make "${MAKE_VARS[@]}" -j"${JOBS}" 3rdparty \
+        || fail "openMSX 3rd-party build failed"
+fi
+
+echo "==> Building openMSX (${TARGET_OS:-host}, flavour=opt$([[ ${NEED_3RDPARTY} -eq 1 ]] && echo ', static 3rdparty'))"
+# The default target links the full openmsx executable (main.cc's main()
+# included). We don't want that executable -- our own frontends supply
+# main() -- and in fact it CANNOT succeed: the frame-sink hook
+# patch-staged-tree.py installs in PostProcessor.cc calls
+# msxhost_notify_frame(), which only core/openmsx/msx_host.cc (linked into
+# our own session library, not into openMSX's own executable) defines. So a
+# link failure here is expected and tolerated, exactly like the Android
+# sibling's build script tolerates it for its own (different) reason -- what
+# both actually need is the object tree the compile step leaves behind
+# regardless of whether the final link succeeded, which is archived next.
+make "${MAKE_VARS[@]}" -j"${JOBS}" \
+    || echo "    (openMSX's own final executable link failed, as expected -- msxhost_notify_frame() is defined by our own core/openmsx/msx_host.cc, not by openMSX; archiving the compiled objects regardless)"
+
+# BUILD_PATH (main.mk) = derived/<cpu>-<os>-<flavour>[-3rd]
+DERIVED_DIR=$(find derived -maxdepth 1 -mindepth 1 -type d | sort | tail -1)
+[[ -n "${DERIVED_DIR}" ]] || fail "no derived/<platform> build directory produced"
+echo "    build directory: ${DERIVED_DIR}"
+
+popd >/dev/null
+
+mkdir -p "${WORK_OUT}/lib" "${WORK_OUT}/include/openmsx-config"
+
+OBJ_COUNT=$(find "${STAGE_DIR}/${DERIVED_DIR}/obj" -name '*.o' ! -name 'main.o' 2>/dev/null | wc -l)
+[[ "${OBJ_COUNT}" -gt 0 ]] || fail "no openMSX objects produced under ${DERIVED_DIR}/obj"
+
+AR="${AR:-ar}"
+[[ "${TARGET_OS}" == "mingw-w64" ]] && AR="x86_64-w64-mingw32-ar"
+
+find "${STAGE_DIR}/${DERIVED_DIR}/obj" -name '*.o' ! -name 'main.o' -print0 \
+    | xargs -0 "${AR}" rcs "${WORK_OUT}/lib/libopenmsx.a"
+echo "    archived ${OBJ_COUNT} openMSX objects -> lib/libopenmsx.a"
+
+if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
+    find "${STAGE_DIR}/${DERIVED_DIR}/3rdparty" -name '*.a' \
+        -exec cp -a {} "${WORK_OUT}/lib/" \; 2>/dev/null || true
+fi
+
+# Headers: the full staged src/ tree (openMSX's own includes are flat across
+# every subdirectory, so nothing here is pruned) plus the generated config
+# headers for this exact platform+flavour build.
+rm -rf "${WORK_OUT}/include/openmsx"
+cp -a "${STAGE_DIR}/src" "${WORK_OUT}/include/openmsx"
+cp -a "${STAGE_DIR}/${DERIVED_DIR}/config/." "${WORK_OUT}/include/openmsx-config/"
+
+# The include-path list our own CMake needs, computed exactly the way
+# openMSX's own build computes SOURCE_DIRS (build/main.mk:260) -- every
+# directory under src, sorted, so a future openMSX version that adds a
+# subdirectory does not silently break our include path.
+( cd "${WORK_OUT}/include/openmsx" && find . -type d | sed 's#^\./##' | sort ) \
+    > "${WORK_OUT}/include-dirs.txt"
+echo "    wrote include-dirs.txt ($(wc -l < "${WORK_OUT}/include-dirs.txt") entries)"
+
+# Runtime share tree: openMSX boots by executing <systemdatadir>/init.tcl,
+# which pulls in share/scripts/*; a subset fails with "Couldn't find
+# init.tcl". C-BIOS (freely redistributable, see COMPLIANCE.md) overlays the
+# machine configs + ROMs so MSX/MSX2/MSX2+ boot with no manufacturer
+# firmware, and the FujiNet extension + fujinet-config.rom are what the
+# FujiNet cartridge device needs to be selectable at boot.
+rm -rf "${WORK_OUT}/share"
+cp -a "${STAGE_DIR}/share" "${WORK_OUT}/share"
+cp -a "${STAGE_DIR}/Contrib/cbios/." "${WORK_OUT}/share/machines/"
+[[ -f "${WORK_OUT}/share/extensions/FujiNet.xml" ]] || fail \
+    "FujiNet.xml missing under ${STAGE_DIR}/share/extensions (openMSX source not the FujiNetWIFI fork?)"
+[[ -f "${WORK_OUT}/share/extensions/fujinet-config.rom" ]] || fail \
+    "fujinet-config.rom missing under ${STAGE_DIR}/share/extensions"
+
+echo "openMSX build complete:"
+echo "  lib     : ${WORK_OUT}/lib"
+echo "  include : ${WORK_OUT}/include"
+echo "  share   : ${WORK_OUT}/share"
