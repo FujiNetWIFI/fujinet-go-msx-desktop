@@ -200,6 +200,23 @@ modules:
       # whatever Cflags the Makefile's own @cflags@ substitution already
       # produced (empty, in practice) rather than overwriting the line, so
       # this stays correct even if that upstream default ever changes.
+      #
+      # This alone turned out NOT to be enough, confirmed by a second real
+      # failure on the exact same line after this fix already landed:
+      # openMSX's own GLEW probe (build/libraries.py's GLEW class) has no
+      # configScriptName set at all, unlike SDL2/Tcl -- so its
+      # getCompileFlags() never invokes `pkg-config --cflags glew` in the
+      # first place; glew.h is found at all only because /app/include is
+      # already on this SDK's default compiler search path, independent of
+      # any per-library flag. GLEW_NO_GLU therefore never reaches the
+      # compiler this way. Rather than chase exactly which global
+      # CFLAGS/CXXFLAGS-propagation mechanism might work (the SDL2/
+      # SDL2_ttf header-symlink fix earlier in this same manifest exists
+      # precisely because an environment-variable approach for a different
+      # problem was self-reverted over the same doubt), ship a stub
+      # GL/glu.h instead: openMSX calls no actual GLU function (confirmed
+      # by the Requires: strip below), so the file only needs to exist,
+      # not do anything.
       - sed -i 's|^Cflags:.*|& -DGLEW_NO_GLU|' glew.pc
       # glew.pc's own template also declares "Requires: glu" unconditionally;
       # openMSX calls no GLU function, and this runtime does not ship a
@@ -209,6 +226,15 @@ modules:
       # unneeded GLU module just to satisfy it.
       - sed -i '/^Requires:/d' glew.pc
       - install -Dm644 glew.pc /app/lib/pkgconfig/glew.pc
+      - |
+        cat > /app/include/GL/glu.h <<'GLUEOF'
+        /* Empty stub. openMSX's own GLEW probe never propagates
+         * GLEW_NO_GLU to the compiler in this build (see this manifest's
+         * own comment above), so glew.h's #include <GL/glu.h> is always
+         * reached; openMSX calls no actual GLU function, so this file
+         * only needs to exist. */
+        #pragma once
+        GLUEOF
     sources:
       - type: archive
         url: https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.tgz
