@@ -82,6 +82,25 @@ if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
     echo "==> Building openMSX's static 3rd-party stack (this takes a while the first time)"
     make "${MAKE_VARS[@]}" -j"${JOBS}" 3rdparty \
         || fail "openMSX 3rd-party build failed"
+
+    # build/3rdparty.mk (patch-staged-tree.py) exports PKG_CONFIG_PATH too,
+    # but only for child processes of THAT make invocation -- SDL2_ttf's own
+    # ./configure, run as part of the "3rdparty" target above, inherits it
+    # fine. The *next* make invocation below (openMSX's own main build,
+    # including its build/probe.py library-detection step) is a brand new
+    # process tree started fresh from this script, which does not inherit
+    # anything the previous make invocation exported internally -- only
+    # what this shell itself exports carries across separate `make` calls.
+    # Without this, a real Windows CI run showed the 3rdparty step's own
+    # SDL2_ttf configure correctly finding freetype2/sdl2 via pkg-config,
+    # while the very next step (the main build's probe) reported nearly
+    # every library as not found -- the same libraries, freshly built
+    # seconds earlier, just probed from a process with no PKG_CONFIG_PATH.
+    PKGCONFIG_DIR=$(find derived -maxdepth 6 -type d \
+        -path '*/3rdparty/install/lib/pkgconfig' | head -1)
+    if [[ -n "${PKGCONFIG_DIR}" ]]; then
+        export PKG_CONFIG_PATH="${PWD}/${PKGCONFIG_DIR}"
+    fi
 fi
 
 echo "==> Building openMSX (${TARGET_OS:-host}, flavour=opt$([[ ${NEED_3RDPARTY} -eq 1 ]] && echo ', static 3rdparty'))"
