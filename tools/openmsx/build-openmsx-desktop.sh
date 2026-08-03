@@ -11,9 +11,12 @@
 #
 # Outputs, under tools/openmsx/work/out/:
 #   lib/libopenmsx.a       every openMSX object except main.o (our own
-#                           frontends provide main()), archived
-#   lib/*.a                 3rd-party static archives (macOS/Windows only;
-#                           Linux links the system copies dynamically)
+#                           frontends provide main()), archived; on macOS/
+#                           Windows this also has every 3rd-party static
+#                           archive's objects merged straight in (Linux
+#                           links the system copies dynamically instead) --
+#                           one self-contained library, not a separate
+#                           lib/*.a set a consumer would need to discover
 #   include/openmsx-config/ the generated config headers (components.hh,
 #                           build-info.hh, ...) for this platform+flavour --
 #                           the only headers actually copied here. The rest
@@ -115,8 +118,51 @@ find "${STAGE_DIR}/${DERIVED_DIR}/obj" -name '*.o' ! -name 'main.o' -print0 \
 echo "    archived ${OBJ_COUNT} openMSX objects -> lib/libopenmsx.a"
 
 if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
-    find "${STAGE_DIR}/${DERIVED_DIR}/3rdparty" -name '*.a' \
-        -exec cp -a {} "${WORK_OUT}/lib/" \; 2>/dev/null || true
+    # Merge every 3rd-party static archive's objects directly into
+    # libopenmsx.a itself, rather than copying them alongside it as
+    # separate .a files for cmake/OpenMSXRuntime.cmake to discover with a
+    # file(GLOB) afterward. That glob has to run at CMake *configure*
+    # time, but these archives only exist once this build script -- a
+    # build-time custom command -- has actually finished running; on a
+    # truly fresh clone and build directory, the very first `cmake -B
+    # build` therefore always sees an empty lib/ and silently links in
+    # ZERO 3rd-party symbols, no error, nothing -- confirmed by a real
+    # macOS CI failure where every SDL2/SDL2_ttf/Tcl/libpng/ogg/vorbis/
+    # theora/GLEW/zlib symbol was undefined at the final link of this
+    # project's own binaries. This dev machine's local builds never
+    # tripped over it because tools/openmsx/work/out/lib already had
+    # these archives sitting there from an earlier run's incremental
+    # rebuild, so the glob "worked" by the same kind of luck the Tcl
+    # search and 3rdparty install-path bugs already caught elsewhere in
+    # this file relied on before their own fixes. Merging into
+    # libopenmsx.a needs no discovery step at any time, at any point in
+    # the configure/build sequence -- one self-contained static library.
+    #
+    # Each archive is extracted into its own numbered subdirectory and
+    # every object renamed with that number as a prefix before being
+    # added: ar's archive member table is a flat namespace keyed on
+    # basename alone, so two different libraries that happen to ship a
+    # same-named object (not far-fetched for generic names like init.o)
+    # would otherwise silently clobber one another once merged into one
+    # archive.
+    merge_dir="$(mktemp -d)"
+    trap 'rm -rf "${merge_dir}"' EXIT
+    lib_count=0
+    while IFS= read -r -d '' archive; do
+        lib_count=$((lib_count + 1))
+        extract_dir="${merge_dir}/${lib_count}"
+        mkdir -p "${extract_dir}"
+        ( cd "${extract_dir}" && "${AR}" x "${archive}" )
+        for obj in "${extract_dir}"/*.o; do
+            [[ -e "${obj}" ]] || continue
+            mv "${obj}" "${extract_dir}/${lib_count}_$(basename "${obj}")"
+        done
+    done < <(find "${STAGE_DIR}/${DERIVED_DIR}/3rdparty" -name '*.a' -print0)
+    if [[ "${lib_count}" -gt 0 ]]; then
+        find "${merge_dir}" -name '*.o' -print0 \
+            | xargs -0 "${AR}" rcs "${WORK_OUT}/lib/libopenmsx.a"
+        echo "    merged ${lib_count} 3rd-party static archive(s) into lib/libopenmsx.a"
+    fi
     # The 3rd-party chain's own install prefix (build/3rdparty.mk:
     # INSTALL_DIR=$(BUILD_PATH)/install, invoked with
     # BUILD_PATH=derived/<platform>/3rdparty -- one directory level below

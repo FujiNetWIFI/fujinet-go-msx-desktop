@@ -141,14 +141,36 @@ set_target_properties(openmsx-lib PROPERTIES
   INTERFACE_INCLUDE_DIRECTORIES "${OPENMSX_INCLUDE_DIRS}")
 add_dependencies(openmsx-lib openmsx-build)
 
-# 3rd-party static archives (macOS/Windows only -- see build-openmsx-desktop.sh).
-# Discovered at generate time from whatever the build actually produced, since
-# the exact archive set depends on which openMSX version's 3rdparty.mk ran.
-file(GLOB OPENMSX_3RDPARTY_LIBS "${OPENMSX_OUT}/lib/*.a")
-list(REMOVE_ITEM OPENMSX_3RDPARTY_LIBS "${OPENMSX_LIB}")
-if(OPENMSX_3RDPARTY_LIBS)
+# macOS/Windows only: build-openmsx-desktop.sh merges every 3rd-party static
+# archive's objects straight into libopenmsx.a itself (see that script's own
+# comment for why -- in short, a file(GLOB) here to discover them as
+# separate lib/*.a files would run at CMake *configure* time, before the
+# build-time custom command that produces them has ever run, so on a truly
+# fresh clone's first configure it would always find nothing and silently
+# link in zero 3rd-party symbols; a real macOS CI failure confirmed exactly
+# that). Nothing further to declare here as a result -- IMPORTED_LOCATION
+# above already points at the one, now self-contained archive.
+#
+# What IS still needed here, and cannot come from any archive: macOS system
+# frameworks. openMSX's own build/platform-darwin.mk links CoreFoundation/
+# CoreServices/ApplicationServices/CoreMIDI/Foundation itself (copied
+# verbatim from there, the authoritative source); OpenGL is what
+# build/libraries.py resolves the GL library to on this platform (`-framework
+# OpenGL`, not a pkg-config module the way Linux's `gl` is); the rest is the
+# standard framework set SDL2's own build links on macOS for windowing/
+# audio/joystick/haptics -- confirmed necessary by a real macOS CI failure
+# whose undefined-symbol list spanned CoreFoundation, CoreMIDI, Foundation
+# (Objective-C runtime calls) and OpenGL functions all at once, the exact
+# fallout of a build with no framework linkage at all.
+if(APPLE)
   set_property(TARGET openmsx-lib APPEND PROPERTY
-    INTERFACE_LINK_LIBRARIES "${OPENMSX_3RDPARTY_LIBS}")
+    INTERFACE_LINK_LIBRARIES
+    "-framework CoreFoundation" "-framework CoreServices"
+    "-framework ApplicationServices" "-framework CoreMIDI"
+    "-framework Foundation" "-framework OpenGL" "-framework Cocoa"
+    "-framework CoreVideo" "-framework CoreAudio" "-framework AudioToolbox"
+    "-framework IOKit" "-framework Carbon" "-framework ForceFeedback"
+    "-framework GameController")
 endif()
 
 # Linux: openMSX links these dynamically against the distribution's own
