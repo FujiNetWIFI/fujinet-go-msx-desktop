@@ -159,26 +159,36 @@ Nine patches:
    this project never moves or otherwise manages the hidden window's
    position.
 
-9. build/3rdparty.mk (Windows only in practice, but not gated on platform --
-   see below): -std=gnu17 added to the CFLAGS openMSX's own 3rdparty chain
-   passes when configuring its bundled pkg-config's internal glib. That
-   glib is 2013-era code that declares a struct member and later accesses
-   a union member both literally named `bool` (glib/goption.c) -- legal C
-   at the time, since bool was just an ordinary identifier unless a
-   translation unit opted in via <stdbool.h>. A real Windows CI run failed
-   here with "two or more data types in declaration specifiers" and
-   "expected identifier before 'bool'" at exactly those two spots: the
-   MinGW-w64 GCC this project's windows.yml pulls in defaults to -std=
-   gnu23, where bool/true/false became real keywords, so `gboolean bool;`
-   is parsed as two competing type-specifiers rather than a declaration.
-   -std=gnu17 restores the dialect this bundled module was actually
-   written against; it is scoped to this single configure line (this
-   module's own build only), so it cannot affect openMSX's own C++23 code
-   or this project's. Not gated on __APPLE__/__linux__ in this script
-   because the anchor and fix apply equally to any host GCC new enough to
-   default to gnu23 -- Windows is simply the only CI platform where that
-   happens to be true today (macOS's Apple Clang and this project's Linux
-   CI runner's GCC do not, as of this pass).
+9. build/3rdparty.mk (Windows/mingw-w64 only): -std=gnu17 added to the
+   CFLAGS openMSX's own 3rdparty chain passes when configuring its bundled
+   pkg-config's internal glib. That glib is 2013-era code that declares a
+   struct member and later accesses a union member both literally named
+   `bool` (glib/goption.c) -- legal C at the time, since bool was just an
+   ordinary identifier unless a translation unit opted in via <stdbool.h>.
+   A real Windows CI run failed here with "two or more data types in
+   declaration specifiers" and "expected identifier before 'bool'" at
+   exactly those two spots: the MinGW-w64 GCC this project's windows.yml
+   pulls in defaults to -std=gnu23, where bool/true/false became real
+   keywords, so `gboolean bool;` is parsed as two competing type-specifiers
+   rather than a declaration. -std=gnu17 restores the dialect this bundled
+   module was actually written against.
+
+   Gated to $(OPENMSX_TARGET_OS) = mingw-w64 via a Make $(if $(filter ...))
+   inside the CFLAGS value itself, not applied unconditionally: the first
+   version of this patch had no platform gate at all (the reasoning at the
+   time was that any host GCC defaulting to gnu23 would need it, and
+   Windows was simply the only CI platform where that happened to be true)
+   -- a real macOS CI run immediately falsified that. Apple Clang failed
+   building this same bundled glib once -std=gnu17 was added, with
+   unrelated -Wint-conversion errors in glib/gatomic.c suddenly becoming
+   hard errors despite -Wno-error=int-conversion still being present in
+   the same CFLAGS string (macOS had built this module successfully many
+   times before, always without an explicit -std=). Root cause of Clang's
+   exact interaction there wasn't pinned down further, since gating this
+   patch to mingw-w64 -- the only target that actually needs it -- avoids
+   the question entirely rather than fighting Apple Clang's -std=gnu17
+   behavior to preserve an unconditional-by-default patch with no benefit
+   to any platform besides Windows.
 
 Deliberately NOT ported: the Android sibling's touch-keyboard release-delay
 patch to src/input/EventDelay.{cc,hh}. A physical keyboard produces real
@@ -726,11 +736,17 @@ def patch_windows_pkgconfig_glib_std(stage_dir: str) -> None:
         "\t\t# FujiNet Go MSX (desktop): see patch-staged-tree.py -- this\n"
         "\t\t# bundled pkg-config's internal glib (2013-era) declares a\n"
         "\t\t# struct/union member literally named `bool` (glib/goption.c),\n"
-        "\t\t# which a host GCC whose default C dialect is gnu23 rejects,\n"
-        "\t\t# since bool/true/false became real keywords in C23. -std=\n"
-        f"\t\t# gnu17 restores the dialect this code was actually written\n"
-        "\t\t# against; scoped to this module's own configure line only.\n"
-        f'\t\tCFLAGS="-Wno-error=int-conversion {marker}" \\\n')
+        "\t\t# which the MinGW-w64 GCC windows.yml pulls in rejects, since\n"
+        "\t\t# its default C dialect is gnu23, where bool/true/false became\n"
+        "\t\t# real keywords. -std=gnu17 restores the dialect this code was\n"
+        "\t\t# actually written against -- gated to mingw-w64 only: applying\n"
+        "\t\t# it unconditionally broke Apple Clang's build of this same\n"
+        "\t\t# module instead (a real macOS CI regression -- an explicit\n"
+        "\t\t# -std= flag apparently changes int-conversion from a warning\n"
+        "\t\t# back to a hard error there, despite -Wno-error=int-conversion\n"
+        "\t\t# still being present), so this only ever applies for Windows.\n"
+        '\t\tCFLAGS="-Wno-error=int-conversion '
+        f'$(if $(filter mingw-w64,$(OPENMSX_TARGET_OS)),{marker},)" \\\n')
     if old not in text:
         fail(f"{path}: pkg-config/glib CFLAGS anchor not found "
              "(openMSX source has drifted from the pinned commit?)")
