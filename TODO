@@ -916,3 +916,19 @@ Known issues / things to remember
   OutputSurface) that would actually require patching -- PostProcessor is
   final and it's more surgery than this port should promise. Revisit only
   as a later simplification, not as part of the initial port.
+* macOS CI is intermittently flaky building pkg-config's bundled glib:
+  glib/gatomic.c's implicit int<->pointer conversions (-Wint-conversion)
+  sometimes compile fine, sometimes fail as hard errors, on nominally
+  identical code and CFLAGS. Confirmed nondeterministic, not caused by
+  anything in this project's patches: re-running the SAME already-green
+  commit (fc3920e) back to back failed once, then succeeded immediately
+  after with no changes at all. Most likely GitHub's macOS runner fleet
+  has heterogeneous Xcode/Clang images across individual instances right
+  now (unconfirmed further). If a macOS CI run fails here, retry the job
+  before assuming a real regression -- check the actual log for gatomic.c
+  specifically before spending time investigating.
+* Downloads during openMSX's 3rdparty build (SourceForge in particular)
+  are flaky enough to expect at least one HTTP 500 per macOS/Windows CI
+  run right now -- tcl8.6.15-src.tar.gz, libpng-1.6.44.tar.gz, freetype
+  and glew have all failed transiently at different points in the same
+  session. Retry the job; this is not a project issue.
