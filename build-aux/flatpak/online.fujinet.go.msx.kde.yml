@@ -159,9 +159,24 @@ modules:
       # whose own build systems chose "lib", was found fine; only glew,
       # the one Makefile that guessed differently, was not). Relocate
       # rather than trust GLEW_DEST's own directory choice.
-      - mkdir -p /app/lib
-      - mv /app/lib64/* /app/lib/
-      - rmdir /app/lib64
+      #
+      # A plain "mv /app/lib64/* /app/lib/" works against a local
+      # flatpak-builder sandbox where /app/lib64 is a real, separate
+      # directory -- but fails on a real GitHub Actions runner with "mv:
+      # cannot overwrite '/app/lib/pkgconfig': Directory not empty",
+      # because on that runner's copy of this runtime /app/lib64 is
+      # already a symlink to /app/lib, so the glob and the destination
+      # resolve to the same directory and mv refuses to move a directory
+      # onto itself. realpath-comparing first makes this correct either
+      # way: a real separate directory gets its contents copied over and
+      # removed, a symlink-to-lib is already in the right place and there
+      # is nothing to do.
+      - |
+        if [ "$(realpath /app/lib64)" != "$(realpath /app/lib)" ]; then
+          mkdir -p /app/lib
+          cp -a /app/lib64/. /app/lib/
+          rm -rf /app/lib64
+        fi
       # glew.pc's own template declares "Requires: glu" unconditionally;
       # openMSX calls no GLU function, and this runtime does not ship a
       # glu.pc for pkg-config to resolve it against anyway (confirmed by a
