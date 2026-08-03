@@ -1,0 +1,190 @@
+FujiNet Go MSX (desktop) -- what is done and what is next
+===========================================================
+
+The port follows fujinet-go-adam-desktop/PORTING.md, whose milestone order
+(section 12) this file adapts. The derivation is
+
+    msx-desktop = (adam-desktop - adam-android) + msx-android
+
+with the CoCo port as the closer model for the "FujiNet listens, emulator
+connects out" transport direction and the variable-frame-geometry pattern,
+and ADAM as the closer model for the debugger engine (the MSX1 VDP is
+literally a TMS9918A, so ADAM's vdpview.c is the widened base rather than a
+reference).
+
+MSX diverges from every sibling in one structural way the other three don't:
+openMSX is not staged and compiled by this project's own CMake the way
+adamcore/AppleWin/XRoar are. It is 570 C++23 translation units with a real
+3rd-party dependency chain (Tcl, SDL2, SDL2_ttf, freetype, libpng, zlib,
+ogg/vorbis/theora, GLEW), and openMSX's own GNUmakefile + build/3rdparty
+chain already solves that per-platform -- the same chain the Android sibling
+already drives successfully. cmake/StageOpenMSX.cmake stages + patches the
+source, then invokes that chain rather than reinventing it. See
+COMPLIANCE.md for the patch list.
+
+Two more MSX-specific decisions, both settled before any code was written:
+  * openMSX owns its own SDL2 Mixer audio and its own msxjoystick1/2 plugs.
+    This app links no SDL3 at all -- core/src/audio_sdl.c and
+    core/src/gamepad_sdl.c from the sibling repos are NOT ported.
+  * Frame capture cannot use the Android app's -Wl,--wrap,SDL_GL_SwapWindow
+    + glReadPixels trick (GNU ld/lld only, absent on macOS). The desktop tap
+    is a hook in PostProcessor::rotateFrames() (src/video/PostProcessor.cc),
+    openMSX's own per-frame CPU-side consumer of the finished FrameSource,
+    reusing the getScaledFrame() helper already in that file. No GL readback
+    at all.
+
+Ports, fixed for this target (never 1985/1986/8055, which the Android
+sibling and a standalone fujinet-pc-msx already use):
+  BoIP (FujiBus over TCP, FujiNet listens, openMSX connects out): 65505
+  Web UI:                                                         64003
+
+
+Done (this pass) -- M0
+-----------------------
+
+  * git init, LICENSE (GPL-3.0, verbatim from fujinet-go-coco-desktop),
+    .gitignore (build*/ with !build-aux/, core/openmsx-generated/,
+    third_party/{openmsx,fujinet-firmware}/, tools/*/work/,
+    .flatpak-builder/).
+  * README.md -- family framing, planned-features list, MSX system ROM
+    story (C-BIOS bundled unconditionally -- this is the one target in the
+    family that gets to have that), status table (all four frontends "not
+    started"/"in progress").
+  * COMPLIANCE.md -- full per-component table, and in particular:
+      - The openMSX licence determination (GPL-2.0-or-later, matching the
+        Android sibling's call on the same ambiguous README wording) is
+        written as a determination, not a quotation.
+      - The three openMSX staged-source patches (BoIP port, the
+        rotateFrames() frame hook, and the explicit *omission* of the
+        Android sibling's touch-keyboard EventDelay patch -- a physical
+        keyboard needs no release-delay hack).
+      - C-BIOS bundled / turboR-and-real-machine ROMs never bundled, same
+        enforcement shape as CoCo's no_embedded_roms.py (adapted: asserts
+        absence rather than gating an ON/OFF option, since MSX has nothing
+        to gate -- C-BIOS is always in).
+  * No PORTING.md in this repo -- confirmed neither coco-desktop nor
+    apple2-desktop carry their own copy either; only adam-desktop (the
+    model repo) has one, and this file (TODO) is where the other three
+    repos actually record per-repo decisions and status. README points at
+    adam-desktop's PORTING.md for the shared specification.
+  * GitHub repo NOT created/pushed yet -- local commits only until the
+    maintainer says otherwise.
+
+
+Next -- M1
+----------
+
+  cmake/Dependencies.cmake
+    msx_provide_dependency() ported from coco's coco_provide_dependency()
+    (SRC override / third_party/ submodule / pinned-commit clone fallback),
+    renamed. Two dependencies:
+      openMSX            FujiNetWIFI/openMSX, branch feat/fujinet,
+                          pin b11b55012 -- submodule, since (unlike XRoar)
+                          it's a live git fork, not a tarball.
+      fujinet-firmware    FujiNetWIFI/fujinet-firmware, pin b9a27cfa1.
+
+  cmake/StageOpenMSX.cmake
+    Stages third_party/openmsx (or OPENMSX_SRC) into
+    core/openmsx-generated/ with a .source-info marker (source commit +
+    the patch-script hash, so it re-stages when either changes, and
+    -DOPENMSX_RESTAGE=ON forces it -- same shape as StageXRoar.cmake).
+    Applies the three patches from COMPLIANCE.md via a Python staging
+    script (idempotent, anchored to exact text, hard-fail on missing
+    anchor -- same discipline as tools/xroar/patch-staged-tree.py).
+
+  tools/openmsx/build-openmsx-desktop.sh
+    Invoked through bash by name (never as a bare .sh -- MSYS2 cmake
+    cannot execute_process() a script). Drives openMSX's own GNUmakefile:
+    OPENMSX_TARGET_OS=linux first (macOS/mingw-w64 come in M7-M9), builds
+    the 3rdparty target when the platform needs static libs, then compiles
+    src/ into obj/*.o and archives everything except main.o into
+    libopenmsx.a -- same object-harvesting shape as the Android sibling's
+    build-openmsx-core.sh (derived/<cpu>-<os>-opt[-3rd]/obj).
+
+  Milestone gate: libopenmsx.a links against a trivial test executable on
+  Linux, from a clean clone with no OPENMSX_SRC override (submodule init
+  only). This is the clone-and-build promise holding from day one, per
+  PORTING.md.
+
+
+Then, in order (M2 through M9)
+-------------------------------
+
+  M2  core/openmsx/msx_host.{cc,hh} (ported from the Android sibling's
+      msx_host.cpp: Reactor boot, -machine <profile> -ext FujiNet, the
+      rotateFrames() frame hook, headless GL via SDL_VIDEODRIVER=offscreen
+      on Linux / a hidden GL window on macOS+Windows) + core/src/session.c
+      (thread lifecycle, the cross-thread command queue, NOT a phase-locked
+      pacer -- openMSX paces itself) + the GNOME frontend, WITH_FUJINET=OFF.
+      Gate: C-BIOS MSX2 reaches the boot screen, keyboard works.
+
+  M3  FujiNet in-process: tools/fujinet/build-fujinet-desktop.sh ported
+      from coco (~95% target-independent per PORTING.md), PC_TARGET=RS232,
+      BoIP 65505, web UI 64003. THE LONG POLE. Gate: press 'c' from C-BIOS,
+      FujiNet CONFIG screen shows a populated host list; ss -tnp shows one
+      ESTABLISHED pair on 65505.
+
+  M4  Settings store, media import (.dsk/.rom/.cas -> SD folder, carts ->
+      cart dir), Import System ROMs (turboR/real-machine), machine profile
+      switching (MSX/MSX2/MSX2+/turboR) with clean restart, joystick
+      binding driven through openMSX Tcl (plug joyporta msxjoystick1,
+      joystick1_config) via the command queue.
+
+  M5  KDE frontend (Qt6 Widgets). Doing this early is what keeps the core
+      honest about staying toolkit-agnostic.
+
+  M6  Debugger engine: z80dasm.{c,h} ported verbatim from adam-desktop
+      (same CPU, already tested). Pause/step/continue call
+      MSXCPUInterface::doBreak/doStep/doContinue directly; breakpoints via
+      Tcl set_bp/remove_bp/list_bp; snapshot reads via
+      debug read_block <debuggable> <offset> <size> against VRAM,
+      physical VRAM, VDP regs (0x40 -- R0-R46, so the command engine
+      registers need no separate source), VDP status regs, VDP palette
+      (RBG order, not RGB) and VDP VRAM pointer. msxvdpview.c/msxvdp.h
+      widen adam-desktop's vdpview.c/adamvdp_* to V9938/V9958: full mode
+      table (TEXT1/2, MULTICOLOR, GRAPHIC1-7 + YJK/YAE), bitmap-mode
+      screen rendering, sprite mode 2, palette RAM, 17-bit VRAM, and a new
+      command-engine pane (SX/SY/DX/DY/NX/NY/CLR/ARG/CMR + S#2 CE/TR).
+      symbols_builtin.c gets an MSX BIOS/BDOS table (CHGET, CHPUT, WRTVDP,
+      LDIRVM, ...) instead of ADAM's EOS/OS7. GNOME debugger window ported
+      from adam-desktop with the VDP tab's command-engine addition.
+
+  M7  CI: linux.yml first (nm -D libfujinet.so), then macos.yml (otool -L
+      every Mach-O, fail on /opt/homebrew or /usr/local) and windows.yml
+      (objdump -p import table, NOT ldd), then flatpak.yml (tcl, sdl2,
+      sdl2_ttf, freetype, libpng, glew added as declared modules -- no
+      network during the sandboxed build, so anything undeclared is
+      simply absent).
+
+  M8  Icons (tools/icons/make-icons.py against fujinet-go-msx's launcher
+      art), desktop entries, AppStream metainfo, CPack DEB/RPM/TGZ,
+      build-aux/windows/installer.nsi.
+
+  M9  macOS (AppKit) + Windows (Win32) frontends and their debugger
+      windows, release.yml, v0.1.0.
+
+
+Known issues / things to remember
+----------------------------------
+
+* openMSX's README states the GPL with no explicit "or later" clause
+  (GPL.txt shipped is v2 text). Treated as GPL-2.0-or-later per the
+  Android sibling's precedent -- see COMPLIANCE.md's determination
+  section, and flag it the same way if this ever needs re-litigating.
+* The FujiNet cartridge device (src/serial/FujiNet.cc) already retries its
+  outbound connect once per second on failure, so unlike CoCo's XRoar
+  becker.c the desktop port does NOT need a lazy-connect source patch here
+  -- upstream's own retry loop is sufficient. Confirm this holds once M3
+  is under real load; if it doesn't, the CoCo becker.c patch is the model
+  to follow.
+* A *failed* renderer init must abort the boot before powerOn() --
+  openMSX's VDP::reset() dereferences a null renderer on a half-up video
+  system. Carry the same guard the Android sibling already has.
+* SDLGL-PP is the only real renderer RendererFactory maps (besides DUMMY),
+  so a GL context of some kind is unavoidable even though the pixels are
+  captured on the CPU side via rotateFrames() rather than read back with
+  glReadPixels. Don't try to drop GL entirely without first checking how
+  much of SDLVideoSystem (ImGui/OSD/snow layers, all built over an
+  OutputSurface) that would actually require patching -- PostProcessor is
+  final and it's more surgery than this port should promise. Revisit only
+  as a later simplification, not as part of the initial port.
