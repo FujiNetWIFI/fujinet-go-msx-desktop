@@ -31,7 +31,7 @@ milestone.
 | Frontend | Toolkit | Binary | Status |
 |---|---|---|---|
 | GNOME | GTK4 + libadwaita (+ WebKitGTK) | `fujinet-go-msx-gnome` | in progress |
-| KDE | Qt6 Widgets (+ QtWebEngine) | `fujinet-go-msx-kde` | not started |
+| KDE | Qt6 Widgets (+ QtWebEngine) | `fujinet-go-msx-kde` | in progress |
 | macOS | AppKit (+ WKWebView) | `FujiNet Go MSX.app` | not started |
 | Windows | Win32 (GDI + DwmFlush) | `fujinet-go-msx-windows.exe` | not started |
 

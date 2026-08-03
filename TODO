@@ -371,32 +371,64 @@ Done (this pass) -- M4
   pre-existing GTK theme-CSS warnings, unrelated to this code.
 
 
-Next -- M5
+Done (this pass) -- M5
+----------------------
+
+  * frontends/kde/{DisplayWidget,MainWindow,FujiNetWindows,main}.{h,cpp}
+    -- ported from CoCo's KDE frontend, adapted the same two ways the
+    GNOME frontend already was: DisplayWidget's frame buffer is fixed
+    640x480 (no per-mode aspect table), and MainWindow's Machine menu
+    switches live via msxsession_set_machine() rather than doing a hard
+    reset. Key mapping (Qt key code -> X11 keysym) uses the exact same
+    XK_* numeric values core/src/input_map.c hardcodes, kept in sync
+    deliberately between the two frontends.
+  * frontends/kde/CMakeLists.txt -- no enable_language(CXX) or
+    CMAKE_CXX_STANDARD override needed, unlike CoCo's: this project
+    already enables C++23 project-wide for core/openmsx/msx_host.cc, so
+    the KDE frontend just inherits it.
+  * Same scope cut as GNOME's, restated here rather than silently
+    dropped: no Import System ROM menu item (same reasoning -- no
+    machine-config generator yet to make an imported ROM bootable).
+
+  VERIFIED: clean build against Qt6 6.11.1 (pkg-config on this
+  machine) on the first attempt -- no compile errors at all, the only
+  surprises this pass were expected clangd noise before reconfiguring.
+  A live run under a real X11 display showed the identical success
+  pattern the GNOME frontend's own verification showed: FujiNet
+  started, BOIP connected, and the console log carried real rs232Fuji
+  command traffic (GET WIFI STATUS, READ HOST SLOTS, READ DEVICE
+  SLOTS) -- this time reached through the Qt display widget instead of
+  GTK's. No crash, no Qt warnings (notably quieter than GTK's
+  pre-existing theme-CSS noise on this system). All 4 ctest cases pass,
+  both rebuilt in place and from a genuine fresh `git clone --local`
+  with no *_SRC overrides.
+
+
+Next -- M6
 ----------
 
-KDE frontend (Qt6 Widgets). Doing this early is what keeps the core
-honest about staying toolkit-agnostic -- window.c/display.c above are the
-reference to port from.
+Debugger engine + the V9938/V9958 VDP debugger + the GNOME debugger
+window. The largest single milestone left; read this in full before
+starting.
+
+z80dasm.{c,h} ported verbatim from adam-desktop (same CPU, already
+tested). Pause/step/continue call MSXCPUInterface::doBreak/doStep/
+doContinue directly; breakpoints via Tcl set_bp/remove_bp/list_bp;
+snapshot reads via debug read_block <debuggable> <offset> <size> against
+VRAM, physical VRAM, VDP regs (0x40 -- R0-R46, so the command engine
+registers need no separate source), VDP status regs, VDP palette (RBG
+order, not RGB) and VDP VRAM pointer. msxvdpview.c/msxvdp.h widen
+adam-desktop's vdpview.c/adamvdp_* to V9938/V9958: full mode table
+(TEXT1/2, MULTICOLOR, GRAPHIC1-7 + YJK/YAE), bitmap-mode screen
+rendering, sprite mode 2, palette RAM, 17-bit VRAM, and a new
+command-engine pane (SX/SY/DX/DY/NX/NY/CLR/ARG/CMR + S#2 CE/TR).
+symbols_builtin.c gets an MSX BIOS/BDOS table (CHGET, CHPUT, WRTVDP,
+LDIRVM, ...) instead of ADAM's EOS/OS7. GNOME debugger window ported
+from adam-desktop with the VDP tab's command-engine addition.
 
 
-Then, in order (M6 through M9)
+Then, in order (M7 through M9)
 -------------------------------
-
-  M6  Debugger engine: z80dasm.{c,h} ported verbatim from adam-desktop
-      (same CPU, already tested). Pause/step/continue call
-      MSXCPUInterface::doBreak/doStep/doContinue directly; breakpoints via
-      Tcl set_bp/remove_bp/list_bp; snapshot reads via
-      debug read_block <debuggable> <offset> <size> against VRAM,
-      physical VRAM, VDP regs (0x40 -- R0-R46, so the command engine
-      registers need no separate source), VDP status regs, VDP palette
-      (RBG order, not RGB) and VDP VRAM pointer. msxvdpview.c/msxvdp.h
-      widen adam-desktop's vdpview.c/adamvdp_* to V9938/V9958: full mode
-      table (TEXT1/2, MULTICOLOR, GRAPHIC1-7 + YJK/YAE), bitmap-mode
-      screen rendering, sprite mode 2, palette RAM, 17-bit VRAM, and a new
-      command-engine pane (SX/SY/DX/DY/NX/NY/CLR/ARG/CMR + S#2 CE/TR).
-      symbols_builtin.c gets an MSX BIOS/BDOS table (CHGET, CHPUT, WRTVDP,
-      LDIRVM, ...) instead of ADAM's EOS/OS7. GNOME debugger window ported
-      from adam-desktop with the VDP tab's command-engine addition.
 
   M7  CI: linux.yml first (nm -D libfujinet.so), then macos.yml (otool -L
       every Mach-O, fail on /opt/homebrew or /usr/local) and windows.yml
