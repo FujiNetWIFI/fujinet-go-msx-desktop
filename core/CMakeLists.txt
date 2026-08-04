@@ -59,6 +59,18 @@ target_include_directories(msxsession
 target_compile_options(msxsession PRIVATE -Wall -Wextra -Wno-format-truncation)
 if(WIN32)
   target_link_libraries(msxsession PUBLIC ws2_32)
+  # Without this, tcl.h declares Tcl's own API (TclFreeObj, ...) as
+  # __declspec(dllimport) -- correct for linking against a real tcl86.dll,
+  # but this project's Tcl is one of the archives build-openmsx-desktop.sh
+  # merges straight into libopenmsx.a as plain static-linked objects, which
+  # provide the real symbols, not DLL import stubs (__imp_TclFreeObj). A
+  # real Windows CI run confirmed exactly this mismatch. build/libraries.py
+  # (openMSX's own build) already adds this for its own static Tcl compiles
+  # ("a hack to avoid including the complete TCL_DEFS ... but still being
+  # able to link on MinGW", its own comment) -- msx_host.cc, part of this
+  # project's own CMake build rather than openMSX's, needs the same define
+  # for its own direct Tcl API calls.
+  target_compile_definitions(msxsession PRIVATE STATIC_BUILD)
 else()
   target_link_libraries(msxsession PUBLIC dl m)
 endif()

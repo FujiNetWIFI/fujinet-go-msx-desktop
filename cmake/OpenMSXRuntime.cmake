@@ -178,6 +178,49 @@ if(APPLE)
     "-framework GameController" "-framework Metal" "-framework CoreHaptics")
 endif()
 
+# Windows: the mingw-w64 equivalent of the macOS framework block above --
+# system import libraries the statically-merged 3rd-party archives and
+# openMSX's own src/ tree need that cannot come from any archive either.
+# A real Windows CI run's undefined-symbol list, once every earlier build-
+# tooling/compile-time issue was fixed and the link step itself finally ran
+# for the first time, was verified symbol-by-symbol against this dev
+# machine's own x86_64-w64-mingw32 toolchain (same version windows.yml
+# uses) rather than assigned from memory:
+#   secur32   -- src/security/SspiNegotiateServer.cc/SspiUtils.cc, openMSX's
+#                own Windows-native SSPI auth for its remote-control server
+#                (AcquireCredentialsHandleW, AcceptSecurityContext, ...)
+#   opengl32  -- openMSX's own GL renderer (glBindTexture, glReadPixels,
+#                ...) plus wglGetCurrentDC/wglGetProcAddress -- Linux gets
+#                this from pkg-config's gl module and macOS from
+#                -framework OpenGL above; Windows has no equivalent
+#                automatic source, it is always a plain system import lib
+#   setupapi,
+#   cfgmgr32  -- SDL2's hidapi joystick backend (SetupDiGetClassDevsA,
+#                CM_Get_Device_IDA, ...) -- these two are always a pair for
+#                Windows device enumeration
+#   imm32     -- SDL2's Input Method Editor support (ImmGetContext, ...)
+#   winmm     -- SDL2's own multimedia timer (timeBeginPeriod/
+#                timeEndPeriod) and openMSX's own native MIDI/WaveAudio
+#                backends (midiInOpen/waveOutOpen and the rest of that
+#                family)
+#   version   -- SDL2's own driver-version checks (GetFileVersionInfoA,
+#                VerQueryValueA)
+#   netapi32,
+#   userenv   -- Tcl's own static-link requirements, confirmed directly
+#                from this same CI run's own probe.py output (the exact
+#                "-lnetapi32 -lkernel32 -luser32 -ladvapi32 -luserenv
+#                -lws2_32" linker command build/libraries.py's TCL class
+#                sources from tclConfig.sh) -- kernel32/user32/advapi32/
+#                ws2_32 all resolved without being listed explicitly here
+#                (MinGW's own default-linked library set already covers
+#                the first three; ws2_32 is msxsession's own WIN32 block
+#                in core/CMakeLists.txt, unrelated to Tcl specifically)
+if(WIN32)
+  set_property(TARGET openmsx-lib APPEND PROPERTY
+    INTERFACE_LINK_LIBRARIES
+    secur32 opengl32 setupapi cfgmgr32 imm32 winmm version netapi32 userenv)
+endif()
+
 # Linux: openMSX links these dynamically against the distribution's own
 # copies (LINK_MODE=SYS_DYN, build-openmsx-desktop.sh's default there), so
 # anything linking libopenmsx.a needs them too -- exactly what
