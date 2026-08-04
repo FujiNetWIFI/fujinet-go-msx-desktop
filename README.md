@@ -25,19 +25,21 @@ already solved the MSX-specific half — openMSX boots C-BIOS with the FujiNet
 extension, and video/audio/keyboard/joystick are all live on real hardware.
 This repository ports that to the desktop shape the other three follow.
 
-**Status: early scaffold, in active development.** See `TODO` for the current
-milestone.
+**Status: released.** All four frontends are complete; see
+[Releases](https://github.com/FujiNetWIFI/fujinet-go-msx-desktop/releases) for
+downloads and `TODO` for the full history.
 
 | Frontend | Toolkit | Binary | Status |
 |---|---|---|---|
-| GNOME | GTK4 + libadwaita (+ WebKitGTK) | `fujinet-go-msx-gnome` | in progress |
-| KDE | Qt6 Widgets (+ QtWebEngine) | `fujinet-go-msx-kde` | in progress |
-| macOS | AppKit (+ WKWebView) | `FujiNet Go MSX.app` | not started |
-| Windows | Win32 (GDI + DwmFlush) | `fujinet-go-msx-windows.exe` | not started |
+| GNOME | GTK4 + libadwaita (+ WebKitGTK) | `fujinet-go-msx-gnome` | done, tested on real hardware |
+| KDE | Qt6 Widgets (+ QtWebEngine) | `fujinet-go-msx-kde` | done, tested on real hardware |
+| macOS | AppKit (+ WKWebView) | `FujiNet Go MSX.app` | done, verified on CI |
+| Windows | Win32 (GDI + DwmFlush) | `fujinet-go-msx-windows.exe` | done, verified on CI |
 
-The maintainer develops on Linux without Mac or Windows hardware: those
+The maintainer develops on Linux without Mac or Windows hardware: those two
 builds are compiled, tested and packaged on CI's macOS and Windows runners,
-and reports from real users on those platforms are very welcome.
+not run interactively by a human yet — reports from real users on those
+platforms are very welcome.
 
 ## Planned features
 
@@ -61,8 +63,7 @@ register views, and a decoded VDP pane that understands the TMS9918A (MSX1),
 V9938 (MSX2) and V9958 (MSX2+) — modes, table addressing, the palette RAM,
 sprite mode 2, and the V9938/V9958 command engine (VRAM-to-VRAM blit unit).
 Available in every frontend over the one shared engine; it extends
-`fujinet-go-adam-desktop`'s TMS9918A visualizer to the V9938/V9958 — see
-`TODO` for the current state.
+`fujinet-go-adam-desktop`'s TMS9918A visualizer to the V9938/V9958.
 
 ## Building
 

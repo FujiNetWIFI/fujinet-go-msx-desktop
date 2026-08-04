@@ -954,10 +954,40 @@ Done (this pass) -- M9 (in progress)
   commit -- all four CI pipelines green simultaneously for the first time
   in this project's history.
 
-Then, in order (M9 continued)
-------------------------------
+M9 done -- v0.1.0 released
+---------------------------
 
-  v0.1.0.
+  Tag cut and GitHub Release published: https://github.com/FujiNetWIFI/
+  fujinet-go-msx-desktop/releases/tag/v0.1.0 -- all 11 artifacts (macOS
+  zip, Windows installer + portable zip, GNOME/KDE DEB/RPM/TGZ, both
+  flatpak bundles) built and attached by release.yml.
+
+  release.yml's own windows-package job needed the same Mesa fix
+  windows.yml just got -- it is a separate job in a separate workflow
+  file, so it does not inherit windows.yml's steps. Missed on the first
+  v0.1.0 tag push (confirmed by a real failed release run), fixed, and
+  the tag moved to the fixed commit and re-pushed -- the first attempt's
+  release was never published (its own `release` job is gated on every
+  package job succeeding, so it was skipped, not broken-and-live).
+
+  GNOME and KDE confirmed by the maintainer running the emulator
+  interactively, not just CI. macOS and Windows are CI-verified only --
+  no interactive human testing yet on either.
+
+  Loose ends, not blocking, not yet triaged:
+  * The first (pre-Mesa-fix) windows-package release run showed
+    boot_smoke specifically SEGFAULT rather than reporting "renderer
+    init failed" the way the other five ctest binaries did on the exact
+    same missing-OpenGL condition. Never reproduced since (Mesa's real
+    OpenGL context means the underlying failure it was hitting no longer
+    happens), so not root-caused. If a null/failed-renderer path can
+    still be reached some other way, this is a real crash-vs-clean-error
+    robustness gap worth closing properly rather than relying on Mesa
+    always being present.
+  * No one has yet clicked through the interactive experience end to end
+    on any platform -- played an actual game, used a real joystick,
+    driven the debugger UI by hand -- beyond what the headless ctest
+    suite and CI's own boot/render/FujiNet-connect checks cover.
 
 
 Known issues / things to remember
