@@ -8,14 +8,27 @@ name: Windows
 # box is available for that; this workflow is the real thing once it runs
 # on a windows-latest runner.
 #
-# UNVERIFIED as of this workflow's first commit, same caveat as macos.yml:
-# no Windows machine in this development environment. OPENMSX_TARGET_OS=
-# mingw-w64 triggers the same NEED_3RDPARTY static-build chain as darwin
-# (cmake/OpenMSXRuntime.cmake, tools/openmsx/build-openmsx-desktop.sh) --
-# untested here for the same reason. The MSYS2 package list below is a
-# best-effort guess at what that chain's ./configure-based sub-builds need
-# (autotools + make + nasm, the last for some 3rd-party libs' asm-optimized
-# paths), not a list confirmed against a real run.
+# Iterated extensively against real windows-latest CI runs (no Windows
+# machine in this development environment, so every fix along the way --
+# tools/openmsx/patches/patch-staged-tree.py's later patches,
+# tools/openmsx/build-openmsx-desktop.sh's ar/PKG_CONFIG_PATH handling,
+# cmake/OpenMSXRuntime.cmake's Windows system-library block,
+# core/src/paths.c's config/data-dir fallback -- was root-caused from a
+# real CI failure, never guessed blind). OPENMSX_TARGET_OS=mingw-w64
+# triggers the same NEED_3RDPARTY static-build chain as darwin
+# (cmake/OpenMSXRuntime.cmake, tools/openmsx/build-openmsx-desktop.sh).
+#
+# The Mesa step below addresses the last gap found this way: openMSX's
+# renderer needs a real OpenGL 2.1+ context, but windows-latest runners
+# have no GPU and Windows' own software fallback (the ancient Microsoft
+# GDI Generic implementation) is OpenGL 1.1 only -- confirmed directly
+# from a real CI run ("renderer init failed: Need at least OpenGL version
+# openGL 2.1"). f3d-app/install-mesa-windows-action drops a real,
+# llvmpipe-backed opengl32.dll (from pal1000/mesa-dist-win, the standard
+# source for this exact well-known GitHub Actions Windows + OpenGL gap)
+# next to the ctest binaries -- Windows' own DLL search order checks an
+# executable's own directory before System32, so this shadows the
+# system's inadequate one without touching anything system-wide.
 
 on:
   push:
@@ -61,6 +74,11 @@ jobs:
 
       - name: Build
         run: cmake --build build
+
+      - name: Install Mesa (software OpenGL for the ctest binaries)
+        uses: f3d-app/install-mesa-windows-action@v1
+        with:
+          path: ${{ github.workspace }}/build/core
 
       - name: Test
         working-directory: build
