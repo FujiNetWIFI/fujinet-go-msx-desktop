@@ -258,6 +258,7 @@ static int resolve_openmsx_share(msxsession *s, const char *override_dir)
                      override_dir);
             return 0;
         }
+        fprintf(stderr, "resolve_openmsx_share: not found: %s\n", probe);
     }
 
     env = getenv("MSX_OPENMSX_SHARE");
@@ -267,6 +268,7 @@ static int resolve_openmsx_share(msxsession *s, const char *override_dir)
             snprintf(s->openmsx_share, sizeof(s->openmsx_share), "%s", env);
             return 0;
         }
+        fprintf(stderr, "resolve_openmsx_share: not found: %s\n", probe);
     }
 
     if (exe_dir()[0]) {
@@ -276,6 +278,7 @@ static int resolve_openmsx_share(msxsession *s, const char *override_dir)
                      "%s/openmsx", exe_dir());
             return 0;
         }
+        fprintf(stderr, "resolve_openmsx_share: not found: %s\n", probe);
     }
 
     snprintf(probe, sizeof(probe), "%s/init.tcl", MSX_INSTALL_DATADIR_SHARE);
@@ -284,6 +287,7 @@ static int resolve_openmsx_share(msxsession *s, const char *override_dir)
                  MSX_INSTALL_DATADIR_SHARE);
         return 0;
     }
+    fprintf(stderr, "resolve_openmsx_share: not found: %s\n", probe);
 
     snprintf(probe, sizeof(probe), "%s/init.tcl", MSX_DEV_OPENMSX_SHARE);
     if (is_file(probe)) {
@@ -291,7 +295,13 @@ static int resolve_openmsx_share(msxsession *s, const char *override_dir)
                  MSX_DEV_OPENMSX_SHARE);
         return 0;
     }
-
+    /* Diagnostic only, no behavior change: same reasoning as paths_init's
+     * own mkdir_p diagnostics above -- msxsession_new() frees the session
+     * object before any caller can retrieve the session_set_error() message
+     * this failure also sets, so every one of every path actually probed
+     * (not just the last one) needs to be visible directly on stderr, or a
+     * real Windows CI failure here is exactly as uninformative as before. */
+    fprintf(stderr, "resolve_openmsx_share: not found: %s\n", probe);
     return -1;
 }
 
@@ -312,8 +322,26 @@ int paths_init(msxsession *s, const msxsession_paths *p)
     make_absolute(s->config_dir, sizeof(s->config_dir));
     make_absolute(s->data_dir, sizeof(s->data_dir));
 
-    if (mkdir_p(s->config_dir) != 0 || mkdir_p(s->data_dir) != 0)
+    /* Diagnostic only, no behavior change: msxsession_new() (paths_init's
+     * only caller) has no session object yet to attach a real error string
+     * to on failure here, so every caller so far -- every ctest test binary
+     * -- can only report "msxsession_new failed", no further detail. A real
+     * Windows CI run hit exactly this, for the first time ever reaching
+     * this code path at all (every earlier build/link fix was a
+     * precondition for the test binaries to even run) -- print directly to
+     * stderr so the actual underlying reason (which of the two mkdir_p
+     * calls failed, and why) is visible on the next run instead of another
+     * guess. */
+    if (mkdir_p(s->config_dir) != 0) {
+        fprintf(stderr, "paths_init: mkdir_p(%s) failed: %s\n",
+                s->config_dir, strerror(errno));
         return -1;
+    }
+    if (mkdir_p(s->data_dir) != 0) {
+        fprintf(stderr, "paths_init: mkdir_p(%s) failed: %s\n",
+                s->data_dir, strerror(errno));
+        return -1;
+    }
 
     snprintf(s->settings_file, sizeof(s->settings_file), "%s/settings.ini",
              s->config_dir);
