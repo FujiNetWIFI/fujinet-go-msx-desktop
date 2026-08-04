@@ -208,6 +208,19 @@ jobs:
       - name: Build
         run: cmake --build build
 
+      # See windows.yml's own comment for why this is needed: windows-latest
+      # runners have no GPU, and Windows' own OpenGL software fallback is
+      # 1.1 only, well short of what openMSX's renderer needs. This job is
+      # a separate workflow file from windows.yml and does not inherit its
+      # steps, so it needs its own copy of this fix -- confirmed missing by
+      # a real release.yml run on the v0.1.0 tag hitting the exact same
+      # "Need at least OpenGL version openGL 2.1" failure; this job's own
+      # test binaries live in build/core, same as windows.yml's.
+      - name: Install Mesa (software OpenGL for the ctest binaries)
+        uses: f3d-app/install-mesa-windows-action@v1
+        with:
+          path: ${{ github.workspace }}/build/core
+
       - name: Test
         working-directory: build
         run: ctest --output-on-failure
