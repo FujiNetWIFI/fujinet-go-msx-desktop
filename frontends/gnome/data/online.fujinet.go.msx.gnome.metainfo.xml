@@ -45,6 +45,18 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.1" date="2026-08-04">
+      <description>
+        <p>
+          Fixes the macOS build refusing to launch on real hardware
+          ("You can't use this version of the application ... with this
+          version of macOS"): the app bundle's minimum macOS version was
+          left unset and defaulting to whatever SDK the CI runner's Xcode
+          shipped, which could be newer than a tester's actual OS. The
+          minimum is now pinned to macOS 11.
+        </p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-08-03">
       <description>
         <p>
