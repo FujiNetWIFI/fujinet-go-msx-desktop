@@ -162,7 +162,15 @@ OBJ_COUNT=$(find "${STAGE_DIR}/${DERIVED_DIR}/obj" -name '*.o' ! -name 'main.o' 
 [[ "${OBJ_COUNT}" -gt 0 ]] || fail "no openMSX objects produced under ${DERIVED_DIR}/obj"
 
 AR="${AR:-ar}"
-[[ "${TARGET_OS}" == "mingw-w64" ]] && AR="x86_64-w64-mingw32-ar"
+# A real Windows CI run showed the hardcoded "x86_64-w64-mingw32-ar" is not
+# on PATH in this environment (xargs: x86_64-w64-mingw32-ar: No such file
+# or directory), even though x86_64-w64-mingw32-gcc itself plainly is (the
+# entire compile step that just finished used it thousands of times).
+# openMSX's own build/3rdparty.mk already solves exactly this the same way
+# for LD/AR/RANLIB/STRIP: ask the compiler for its own companion tool's
+# real location via -print-prog-name, rather than guessing a bare
+# triple-prefixed name and hoping it is separately on PATH too.
+[[ "${TARGET_OS}" == "mingw-w64" ]] && AR="$(x86_64-w64-mingw32-gcc -print-prog-name=ar)"
 
 find "${STAGE_DIR}/${DERIVED_DIR}/obj" -name '*.o' ! -name 'main.o' -print0 \
     | xargs -0 "${AR}" rcs "${WORK_OUT}/lib/libopenmsx.a"
