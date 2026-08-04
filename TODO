@@ -877,19 +877,87 @@ Done (this pass) -- M9 (in progress)
   including machine_switch_test, boot_smoke, fujinet_smoke, rpc_test,
   debugger_test, vdp_test. Linux and Flatpak also green on that commit.
 
-  Windows CI (windows.yml) still fails on a pre-existing, unrelated issue:
-  openMSX's vendored 3rd-party pkg-config-0.29.2 build compiles its own
-  bundled glib against a modern MinGW GCC that treats `bool` as a real
-  keyword (glib/goption.c:169/1603, "two or more data types in
-  declaration specifiers" / "expected identifier before 'bool'") --
-  confirmed identical on every push since it first appeared, not a
-  regression from any change in this pass. Deferred by explicit prior
-  agreement; not yet investigated further.
+  Windows CI (windows.yml): went from "does not build at all" through a
+  long chain of distinct, real bugs -- each root-caused from an actual CI
+  log (several by reading the real MinGW-w64 headers/toolchain, installed
+  on this dev machine at the same version windows.yml uses, or by
+  cross-compiling a minimal reproduction and running it under Wine when a
+  real Windows box was not available) -- fixed and re-verified on real CI
+  one at a time:
+    * openMSX's own vendored pkg-config-0.29.2 build: four distinct C
+      portability bugs in its bundled glib (2013-era code, never
+      previously exercised against a modern MinGW GCC/UCRT toolchain) --
+      `bool` used as an ordinary identifier (now a real C23 keyword),
+      G_GSIZE_FORMAT misdetected for a 64-bit Windows size_t, a
+      GStatBuf/_stat64i32 struct-tag mismatch on the non-MSC path,
+      InterlockedCompareExchangePointer() called with the wrong pointer
+      type at two call sites -- all fixed with narrow `sed` edits in
+      patch-staged-tree.py's build/3rdparty.mk recipe, not CFLAGS
+      (pkg-config's own configure does not forward CFLAGS to this
+      bundled glib's recursive configure at all, confirmed from the real
+      CI log's own "configure: running ... 'CC=...'" announcement).
+    * PKG_CONFIG_PATH was never exported for this 3rdparty chain at all
+      (build/3rdparty.mk) nor carried across the separate `make
+      3rdparty`/`make` process boundary this project's own build-openmsx-
+      desktop.sh uses (a shell export, not Make's own, is what survives
+      that boundary).
+    * openMSX's own build/libraries.py's cross-pkg-config lookup only
+      matched an extension-less filename; the real installed binary on
+      Windows is *-pkg-config.exe.
+    * openMSX's own build/msysutils.py had two genuine, never-previously-
+      exercised Python-2-only bugs (a bare `print` statement; bytes/str
+      concatenation) in its MSYS root-detection helper, only reached once
+      this project's own OSTYPE=msys export (needed so build/executils.py
+      routes *-config script calls through `sh -c`, since Windows cannot
+      execute a #!/bin/sh script directly) made msysActive() return true
+      for the first time.
+    * src/events/Socket.hh's <winsock2.h> include transitively pulls in
+      windows.h's own COM headers, which `#define interface struct` --
+      poisoning six unrelated openMSX headers that use "interface" as an
+      ordinary parameter name; fixed with #undef interface right after
+      Socket.hh's own Windows-only winsock includes.
+    * This project's own build-openmsx-desktop.sh hardcoded
+      "x86_64-w64-mingw32-ar" assuming it would be on PATH; not on this
+      exact MSYS2 UCRT64 image -- switched to asking the compiler itself
+      via `-print-prog-name=ar`, the same technique openMSX's own
+      3rdparty.mk already uses for LD/AR/RANLIB/STRIP.
+    * cmake/OpenMSXRuntime.cmake had an if(APPLE) framework block and a
+      Linux pkg-config block, but no Windows system-library block at all
+      -- added one (secur32/opengl32/setupapi/cfgmgr32/imm32/winmm/
+      version/netapi32/userenv), every symbol individually verified
+      against this dev machine's own toolchain with `nm` before being
+      assigned to a library. Separately, core/CMakeLists.txt's own
+      msxsession target needed -DSTATIC_BUILD for its direct Tcl API
+      calls (the same MinGW-linking hack openMSX's own build/libraries.py
+      already uses for its own Tcl compiles).
+    * core/src/paths.c's msxsession_new() genuinely failed at runtime on
+      this exact CI runner account: mkdir_p() on the resolved
+      %APPDATA%\fujinet-go-msx returned a real, repeatable
+      EACCES/"Permission denied" (two mechanical hypotheses -- a
+      drive-letter-root mkdir_p() bug, a race between serial ctest
+      binaries -- were both ruled out with real evidence, not assumed
+      innocent). Not chased to its exact CI-account-specific NTFS/AV
+      cause; instead made resilient, falling back to a %TEMP%-based
+      directory (guaranteed writable by the current user) when the
+      preferred one cannot be created.
+    * openMSX's own SDLGL-PP renderer needs a real OpenGL 2.1+ context;
+      windows-latest runners have no GPU and Windows' own software
+      fallback is OpenGL 1.1 only -- a well-known GitHub Actions Windows
+      gap, fixed the standard way (f3d-app/install-mesa-windows-action
+      drops a real llvmpipe-backed opengl32.dll next to the ctest
+      binaries in windows.yml).
+
+  CONFIRMED on real Windows CI (commit d7859a8, third attempt after two
+  unrelated SourceForge zlib download flakes): all 8 ctest tests pass,
+  including boot_smoke, fujinet_smoke, machine_switch_test, rpc_test,
+  debugger_test, vdp_test. Linux, macOS and Flatpak all green on the same
+  commit -- all four CI pipelines green simultaneously for the first time
+  in this project's history.
 
 Then, in order (M9 continued)
 ------------------------------
 
-  Windows CI's pkg-config/glib bool-keyword build failure, then v0.1.0.
+  v0.1.0.
 
 
 Known issues / things to remember
