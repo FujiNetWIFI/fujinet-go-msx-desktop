@@ -305,6 +305,62 @@ static int resolve_openmsx_share(msxsession *s, const char *override_dir)
     return -1;
 }
 
+/* Ensures dir (already absolute) exists, falling back to a %TEMP%-based
+ * directory on Windows if the caller's preferred location cannot be
+ * created. A real Windows CI run's own diagnostics (this file's own
+ * comment below) traced a genuine, first-time-only-now-reachable runtime
+ * failure to mkdir_p() on the resolved per-user config/data directory
+ * (e.g. %APPDATA%\fujinet-go-msx) returning EACCES on a real GitHub
+ * Actions Windows runner -- ruled out, with real evidence rather than
+ * guesswork, as either a bug in mkdir_p()'s own path-walking (a
+ * cross-compiled reproduction run under Wine confirmed mkdir("C:") and
+ * every real intermediate segment already behave exactly as mkdir_p()
+ * expects, returning EEXIST where expected) or a race between concurrent
+ * ctest test binaries (windows.yml's own ctest invocation has no -j flag,
+ * so tests run serially, and the very first test to reach this code
+ * already failed here). What remains -- some real, CI-runner-specific
+ * NTFS/security-policy restriction on that exact account's AppData tree,
+ * not reproducible from this dev environment (no real Windows box, and
+ * Wine's own filesystem/ACL emulation is not a faithful stand-in for a
+ * real Windows account's actual permissions) -- is not chased further;
+ * %TEMP% is a directory Windows guarantees is writable by the current
+ * user specifically for exactly this kind of case, so falling back to it
+ * is a targeted, low-risk resilience improvement regardless of the exact
+ * underlying cause. Linux/macOS behavior is unchanged: this fallback is
+ * WIN32-only, since neither platform has shown this failure and their
+ * existing hard-fail-on-error behavior is not in question.
+ */
+static int ensure_dir(char *dir, size_t dirsz, const char *leaf)
+{
+    if (mkdir_p(dir) == 0) return 0;
+#if defined(_WIN32)
+    {
+        const char *tmp = getenv("TEMP");
+        char fallback[MSX_PATH_MAX];
+        fprintf(stderr,
+                "paths_init: mkdir_p(%s) failed: %s -- falling back to "
+                "%%TEMP%%\n", dir, strerror(errno));
+        if (!tmp || !*tmp) tmp = getenv("TMP");
+        if (!tmp || !*tmp) return -1;
+        snprintf(fallback, sizeof(fallback), "%s\\fujinet-go-msx\\%s",
+                 tmp, leaf);
+        if (mkdir_p(fallback) != 0) {
+            fprintf(stderr, "paths_init: mkdir_p(%s) also failed: %s\n",
+                    fallback, strerror(errno));
+            return -1;
+        }
+        snprintf(dir, dirsz, "%s", fallback);
+        return 0;
+    }
+#else
+    (void)dirsz;
+    (void)leaf;
+    fprintf(stderr, "paths_init: mkdir_p(%s) failed: %s\n", dir,
+            strerror(errno));
+    return -1;
+#endif
+}
+
 int paths_init(msxsession *s, const msxsession_paths *p)
 {
     if (p && p->config_dir && *p->config_dir)
@@ -322,26 +378,10 @@ int paths_init(msxsession *s, const msxsession_paths *p)
     make_absolute(s->config_dir, sizeof(s->config_dir));
     make_absolute(s->data_dir, sizeof(s->data_dir));
 
-    /* Diagnostic only, no behavior change: msxsession_new() (paths_init's
-     * only caller) has no session object yet to attach a real error string
-     * to on failure here, so every caller so far -- every ctest test binary
-     * -- can only report "msxsession_new failed", no further detail. A real
-     * Windows CI run hit exactly this, for the first time ever reaching
-     * this code path at all (every earlier build/link fix was a
-     * precondition for the test binaries to even run) -- print directly to
-     * stderr so the actual underlying reason (which of the two mkdir_p
-     * calls failed, and why) is visible on the next run instead of another
-     * guess. */
-    if (mkdir_p(s->config_dir) != 0) {
-        fprintf(stderr, "paths_init: mkdir_p(%s) failed: %s\n",
-                s->config_dir, strerror(errno));
+    if (ensure_dir(s->config_dir, sizeof(s->config_dir), "config") != 0)
         return -1;
-    }
-    if (mkdir_p(s->data_dir) != 0) {
-        fprintf(stderr, "paths_init: mkdir_p(%s) failed: %s\n",
-                s->data_dir, strerror(errno));
+    if (ensure_dir(s->data_dir, sizeof(s->data_dir), "data") != 0)
         return -1;
-    }
 
     snprintf(s->settings_file, sizeof(s->settings_file), "%s/settings.ini",
              s->config_dir);
