@@ -1025,6 +1025,21 @@ Known issues / things to remember
   now (unconfirmed further). If a macOS CI run fails here, retry the job
   before assuming a real regression -- check the actual log for gatomic.c
   specifically before spending time investigating.
+* openMSX pin moved from b11b550120fe9d342f9bd64128de7bd06e1a7758 to
+  b9adad302e4ad54e9805c681d53e32b921a02853 in v0.1.2
+  (cmake/Dependencies.cmake plus both flatpak manifests, which have to
+  stay in lockstep -- and the version lives in CMakeLists.txt's project()
+  plus a <release> entry in BOTH metainfo files, all three of which the
+  release workflow's check-version job compares against the tag). The M1 record
+  above still names the old SHA; it is a record of that pass, not the
+  current pin. The bump carries three upstream commits (a console command
+  to toggle the config ROM, two config-rom refreshes) and the fix for
+  FujiNet::readMem() short-circuiting to peekUserROM() whenever a user ROM
+  was enabled, which masked the 0xBFFC/0xBFFD IO window behind the ROM's
+  own 0xFF padding and hung every client launched from CONFIG. Local
+  third_party/openmsx checkouts do NOT auto-update to a new pin --
+  msx_provide_dependency() only warns about the drift -- so an existing
+  working tree needs a manual fetch + checkout.
 * Downloads during openMSX's 3rdparty build (SourceForge in particular)
   are flaky enough to expect at least one HTTP 500 per macOS/Windows CI
   run right now -- tcl8.6.15-src.tar.gz, libpng-1.6.44.tar.gz, freetype

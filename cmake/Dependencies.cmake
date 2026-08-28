@@ -34,7 +34,7 @@ find_package(Git QUIET)
 # which adds the FujiNet cartridge device (src/serial/FujiNet.cc,
 # FujiBusPacket). GPL-2.0-or-later; see COMPLIANCE.md for the licence
 # determination.
-set(OPENMSX_COMMIT "b11b550120fe9d342f9bd64128de7bd06e1a7758")
+set(OPENMSX_COMMIT "b9adad302e4ad54e9805c681d53e32b921a02853")
 set(OPENMSX_URL "https://github.com/FujiNetWIFI/openMSX")
 
 set(FUJINET_COMMIT "b9a27cfa145134f5a7088535ac2721eb3cdf41be")

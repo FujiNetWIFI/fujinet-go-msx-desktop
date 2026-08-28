@@ -327,7 +327,7 @@ modules:
       # sentinels (src/main.cc, src/main.cpp) already here.
       - type: git
         url: https://github.com/FujiNetWIFI/openMSX
-        commit: b11b550120fe9d342f9bd64128de7bd06e1a7758
+        commit: b9adad302e4ad54e9805c681d53e32b921a02853
         dest: third_party/openmsx
       - type: git
         url: https://github.com/FujiNetWIFI/fujinet-firmware

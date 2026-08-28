@@ -45,6 +45,18 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.2" date="2026-08-28">
+      <description>
+        <p>
+          Fixes FujiNet going silent for any program launched from the
+          FujiNet CONFIG ROM. The emulated cartridge stopped decoding its
+          own receive and status registers once a user ROM was mapped in,
+          so a program could send a request but never see the answer and
+          would wait for it forever. Also picks up a console command to
+          toggle the config ROM and two config ROM refreshes.
+        </p>
+      </description>
+    </release>
     <release version="0.1.1" date="2026-08-04">
       <description>
         <p>
