@@ -51,7 +51,7 @@ M1
     third_party/ actually does at runtime, despite its own comment saying
     "submodule" -- there is no .gitmodules there either). openMSX pinned at
     b11b550120fe9d342f9bd64128de7bd06e1a7758 (feat/fujinet), fujinet-firmware
-    at b9a27cfa145134f5a7088535ac2721eb3cdf41be.
+    at 07e1bed306c43d6aadaf6f1fabf92e16aa759a09.
   * cmake/StageOpenMSX.cmake -- stages src/, build/, share/ and
     Contrib/cbios into core/openmsx-generated/, then runs
     tools/openmsx/patches/patch-staged-tree.py. Re-stages on source or

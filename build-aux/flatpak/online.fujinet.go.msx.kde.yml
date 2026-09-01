@@ -344,5 +344,5 @@ modules:
         dest: third_party/openmsx
       - type: git
         url: https://github.com/FujiNetWIFI/fujinet-firmware
-        commit: b9a27cfa145134f5a7088535ac2721eb3cdf41be
+        commit: 07e1bed306c43d6aadaf6f1fabf92e16aa759a09
         dest: third_party/fujinet-firmware
