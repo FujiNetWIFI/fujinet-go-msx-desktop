@@ -37,7 +37,7 @@ find_package(Git QUIET)
 set(OPENMSX_COMMIT "b9adad302e4ad54e9805c681d53e32b921a02853")
 set(OPENMSX_URL "https://github.com/FujiNetWIFI/openMSX")
 
-set(FUJINET_COMMIT "07e1bed306c43d6aadaf6f1fabf92e16aa759a09")
+set(FUJINET_COMMIT "13465cdd044304ff96ad41a5f029087b28bed17f")
 set(FUJINET_URL "https://github.com/FujiNetWIFI/fujinet-firmware")
 
 # msx_provide_dependency(NAME <n> PATH <p> SENTINEL <file> OVERRIDE <VAR>
