@@ -95,9 +95,48 @@ if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
     MAKE_VARS+=(3RDPARTY_FLAG=true)
 fi
 
+# Puts tarball NAME (sha256 SHA) in DIR from the first of the given base URLs
+# that serves it intact. openMSX skips any tarball already in its download
+# directory and still verifies its checksum, so a mirror is safe to use.
+seed_tarball() {
+    local dir="$1" name="$2" sha="$3"
+    shift 3
+    [[ -f "${dir}/${name}" ]] && return 0
+    mkdir -p "${dir}"
+    python3 - "${dir}/${name}" "${sha}" "$@" <<'PY' \
+        || echo "    (could not seed ${name}; openMSX will try its own download)"
+import hashlib, sys, urllib.request
+dest, sha, bases = sys.argv[1], sys.argv[2], sys.argv[3:]
+name = dest.replace("\\", "/").rsplit("/", 1)[-1]
+for base in bases:
+    url = f"{base}/{name}"
+    try:
+        data = urllib.request.urlopen(url, timeout=60).read()
+    except Exception as e:
+        print(f"    {url}: {e}")
+        continue
+    if hashlib.sha256(data).hexdigest() != sha:
+        print(f"    {url}: checksum mismatch")
+        continue
+    with open(dest, "wb") as f:
+        f.write(data)
+    print(f"    seeded {name} from {base}")
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
 pushd "${STAGE_DIR}" >/dev/null
 
 if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
+    # pkg-config.freedesktop.org reset every connection from GitHub's macOS
+    # runners on 2026-10-15 (three release runs in a row); MacPorts mirrors
+    # the identical tarball.
+    seed_tarball derived/3rdparty/download pkg-config-0.29.2.tar.gz \
+        6fc69c01688c9458a57eb9a1664c9aba372ccda420a02bf4429fe610e7e7d591 \
+        https://pkg-config.freedesktop.org/releases \
+        https://distfiles.macports.org/pkgconfig
+
     echo "==> Building openMSX's static 3rd-party stack (this takes a while the first time)"
     make "${MAKE_VARS[@]}" -j"${JOBS}" 3rdparty \
         || fail "openMSX 3rd-party build failed"
