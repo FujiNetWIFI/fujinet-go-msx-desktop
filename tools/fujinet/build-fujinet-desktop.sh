@@ -747,6 +747,20 @@ prepare_python_env() {
         "${py}" -m venv --system-site-packages "${VENV_ROOT}" \
             || fail "could not create the python virtualenv at ${VENV_ROOT}"
     fi
+
+    # The firmware's build_prereqs.py stops the build when pyyaml or jinja2
+    # is missing instead of installing it. Distributions and the flatpak SDK
+    # provide both; Homebrew's and MSYS2's python do not, so pip them in.
+    local vpy=""
+    for vpy in "${VENV_ROOT}/bin/python" "${VENV_ROOT}/bin/python.exe" \
+               "${VENV_ROOT}/Scripts/python.exe" ""; do
+        [[ -z "${vpy}" || -x "${vpy}" ]] && break
+    done
+    [[ -n "${vpy}" ]] || fail "no python in the virtualenv at ${VENV_ROOT}"
+    if ! "${vpy}" -c 'import yaml, jinja2' 2>/dev/null; then
+        "${vpy}" -m pip install -q 'pyyaml>=5.1' 'jinja2>=3.0.0' \
+            || fail "could not install pyyaml and jinja2 into ${VENV_ROOT}"
+    fi
 }
 
 # --------------------------------------------------------------------------
