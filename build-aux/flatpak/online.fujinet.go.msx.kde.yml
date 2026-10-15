@@ -340,9 +340,9 @@ modules:
       # Pinned exactly as cmake/Dependencies.cmake: same commits.
       - type: git
         url: https://github.com/FujiNetWIFI/openMSX
-        commit: b9adad302e4ad54e9805c681d53e32b921a02853
+        commit: b23ff675d75cc0c3401b469a518f668a0e7a823b
         dest: third_party/openmsx
       - type: git
         url: https://github.com/FujiNetWIFI/fujinet-firmware
-        commit: 13465cdd044304ff96ad41a5f029087b28bed17f
+        commit: bc2aca35922d708486f85b2216fca35cd9b524b6
         dest: third_party/fujinet-firmware

@@ -45,6 +45,17 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.1.5" date="2026-10-15">
+      <description>
+        <p>
+          Cartridge ROMs mounted from FujiNet CONFIG boot again. Booting any
+          .rom crashed the app, because the FujiNet cartridge device read a
+          mapper type the firmware no longer sent. MSX megaROMs named with
+          their mapper, such as game[ASCII8].rom, now switch banks correctly,
+          and an untagged ROM loads as a plain cartridge.
+        </p>
+      </description>
+    </release>
     <release version="0.1.4" date="2026-09-02">
       <description>
         <p>

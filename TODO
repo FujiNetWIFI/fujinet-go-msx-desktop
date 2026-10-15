@@ -1025,6 +1025,14 @@ Known issues / things to remember
   now (unconfirmed further). If a macOS CI run fails here, retry the job
   before assuming a real regression -- check the actual log for gatomic.c
   specifically before spending time investigating.
+* v0.1.5 pins openMSX b23ff675d75cc0c3401b469a518f668a0e7a823b and
+  fujinet-firmware bc2aca35922d708486f85b2216fca35cd9b524b6 (PR #2002's
+  head, branch rs232-msx-rom-type; re-pin to its merge commit once it lands).
+  Since #1525 the firmware's ROM push opened the DBC stream with no params,
+  and FujiNet::handleDBCCommand read param(1) from an empty vector: any .rom
+  booted from CONFIG crashed the app. #2002 sends (0, mapper type) for
+  "[ASCII8]/[ASCII16]/[Konami]/[KonamiSCC].rom" names; b23ff675d defaults a
+  typeless OPEN to a plain ROM.
 * openMSX pin moved from b11b550120fe9d342f9bd64128de7bd06e1a7758 to
   b9adad302e4ad54e9805c681d53e32b921a02853 in v0.1.2
   (cmake/Dependencies.cmake plus both flatpak manifests, which have to
