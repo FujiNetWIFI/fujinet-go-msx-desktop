@@ -122,10 +122,14 @@ function(msx_provide_dependency)
       "or point ${DEP_OVERRIDE} at an existing checkout.")
   endif()
 
-  # Warn when a git checkout has drifted from the pin recorded here -- the
-  # FujiNet source patches and the openMSX staged-source patches are anchored
-  # to exact text and fail confusingly against a drifted tree.
-  if(DEP_COMMIT AND EXISTS "${CMAKE_SOURCE_DIR}/.git")
+  # Keep the third_party clone on the pin recorded here -- the FujiNet source
+  # patches and the openMSX staged-source patches are anchored to exact text
+  # and fail confusingly against a drifted tree. A clone made for an older pin
+  # is otherwise never moved, since the clone above only runs when it is
+  # missing. A clone with local edits is left alone; develop in a checkout
+  # named by the override variable instead.
+  if(DEP_COMMIT AND EXISTS "${CMAKE_SOURCE_DIR}/.git"
+     AND EXISTS "${_path}/.git")
     find_package(Git QUIET)
     if(GIT_FOUND)
       execute_process(
@@ -133,9 +137,48 @@ function(msx_provide_dependency)
         OUTPUT_VARIABLE _head OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET RESULT_VARIABLE _rc)
       if(_rc EQUAL 0 AND NOT _head STREQUAL DEP_COMMIT)
-        message(STATUS
-          "${DEP_NAME}: checkout is ${_head}, pinned ${DEP_COMMIT} "
-          "(cmake/Dependencies.cmake)")
+        execute_process(
+          COMMAND ${GIT_EXECUTABLE} -C "${_path}" status --porcelain
+                  --untracked-files=no
+          OUTPUT_VARIABLE _dirty OUTPUT_STRIP_TRAILING_WHITESPACE
+          ERROR_QUIET)
+        if(_dirty)
+          message(WARNING
+            "${DEP_NAME}: ${DEP_PATH} is at ${_head} with local changes, "
+            "pinned ${DEP_COMMIT} (cmake/Dependencies.cmake). Left as is; "
+            "its patches may not apply.")
+        else()
+          message(STATUS
+            "${DEP_NAME}: moving ${DEP_PATH} from ${_head} to the pin "
+            "${DEP_COMMIT}")
+          execute_process(
+            COMMAND ${GIT_EXECUTABLE} -C "${_path}" cat-file -e
+                    "${DEP_COMMIT}^{commit}"
+            ERROR_QUIET RESULT_VARIABLE _rc)
+          if(NOT _rc EQUAL 0)
+            execute_process(
+              COMMAND ${GIT_EXECUTABLE} -C "${_path}" fetch --quiet origin
+                      "${DEP_COMMIT}"
+              RESULT_VARIABLE _rc)
+          endif()
+          if(NOT _rc EQUAL 0)
+            # A server that refuses fetches by commit id.
+            execute_process(
+              COMMAND ${GIT_EXECUTABLE} -C "${_path}" fetch --quiet origin
+              RESULT_VARIABLE _rc)
+          endif()
+          execute_process(
+            COMMAND ${GIT_EXECUTABLE} -C "${_path}"
+                    -c advice.detachedHead=false checkout --quiet
+                    "${DEP_COMMIT}"
+            RESULT_VARIABLE _rc)
+          if(NOT _rc EQUAL 0)
+            message(FATAL_ERROR
+              "${DEP_NAME}: could not check out the pin ${DEP_COMMIT} in "
+              "${DEP_PATH}. Delete ${DEP_PATH} to re-clone it, or point "
+              "${DEP_OVERRIDE} at a checkout of that commit.")
+          endif()
+        endif()
       endif()
     endif()
   endif()
