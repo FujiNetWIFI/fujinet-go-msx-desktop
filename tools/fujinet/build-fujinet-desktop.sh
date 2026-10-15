@@ -431,6 +431,19 @@ patch("fujinet_pc.cmake", [
     ),
 ])
 
+# --- no -Werror for the embedded build ------------------------------------
+# Upstream builds with -Werror (#1960). This library is built by every CI
+# compiler and every distribution's (Ubuntu's gcc flags libsmb2's dcerpc.c
+# with -Wmaybe-uninitialized), and a new warning there must not fail a release.
+patch("fujinet_pc.cmake", [
+    (
+        'add_compile_options(-Werror)\n',
+        'if(NOT FUJINET_EMBEDDED)\n'
+        '    add_compile_options(-Werror)\n'
+        'endif()\n',
+    ),
+])
+
 # --- version_common.py: work without git ----------------------------------
 # The staged tree carries no .git (see stage_local_source), and a submodule
 # checkout could not provide usable metadata here anyway. Two of the helpers
