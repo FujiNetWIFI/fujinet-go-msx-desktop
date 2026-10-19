@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Fourteen patches:
+Fifteen patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -365,6 +365,19 @@ an on-screen keyboard's synthetic back-to-back press+release.
     confirmed as actual errors yet, and this session's discipline
     throughout has been to fix what real evidence shows, not what might
     theoretically also be broken.
+
+15. src/serial/FujiNet.cc: trace hooks for the debugger's FujiNet tab.
+    Two extern "C" calls into core/openmsx/msx_host.cc, the same pattern
+    as patches 2 and 3. msxhost_fujinet_trace(dir, buf, len) gets every
+    byte the cartridge's socket carries: what readSocket() receives (dir 0,
+    reader thread, before any DBC handling), each IO_PUTC byte writeMem()
+    sends for the MSX (dir 1, openMSX thread), and the DBC ack fujiBusAck()
+    sends on its own (dir 2, reader thread). The ack has its own dir so
+    the decoder never splices it into an MSX frame being written a byte at
+    a time on the other thread. msxhost_fujinet_link(up) reports the
+    socket connecting (readSocket()) and closing (close(), which is also
+    the failed-connect path). Nothing else changes: bytes are reported
+    only once sent, and the cartridge's behaviour is untouched.
 """
 import sys
 
@@ -1192,6 +1205,87 @@ def patch_windows_interface_macro(stage_dir: str) -> None:
           "headers")
 
 
+def patch_fujinet_trace_hook(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/serial/FujiNet.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "msxhost_fujinet_trace"
+    if marker in text:
+        return  # already patched
+
+    def swap(old: str, new: str, what: str) -> None:
+        nonlocal text
+        if old not in text:
+            fail(f"{path}: {what} anchor not found "
+                 "(openMSX source has drifted from the pinned commit?)")
+        text = text.replace(old, new, 1)
+
+    swap("namespace openmsx {\n",
+         "namespace openmsx {\n\n"
+         "// FujiNet Go MSX (desktop) FujiNet trace hooks -- see\n"
+         "// tools/openmsx/patches/patch-staged-tree.py and\n"
+         "// core/openmsx/msx_host.cc. dir: 0 received, 1 an MSX IO_PUTC byte\n"
+         "// sent, 2 this cartridge's own DBC ack sent.\n"
+         'extern "C" void msxhost_fujinet_trace(int dir, const uint8_t* buf, size_t len);\n'
+         'extern "C" void msxhost_fujinet_link(int up);\n',
+         "'namespace openmsx {'")
+
+    # The socket closes (close() is also the failed-connect path)...
+    swap("\tif (oldSock != OPENMSX_INVALID_SOCKET) {\n"
+         "\t\tsock_close(oldSock);\n"
+         "\t}\n",
+         "\tif (oldSock != OPENMSX_INVALID_SOCKET) {\n"
+         "\t\tsock_close(oldSock);\n"
+         "\t\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\t\tmsxhost_fujinet_link(0);\n"
+         "\t}\n",
+         "close()")
+
+    # ...and connects.
+    swap("\t\t\t\tTimer::sleep(1'000'000); // retry once per second\n"
+         "\t\t\t\tcontinue;\n"
+         "\t\t\t}\n"
+         "\t\t}\n",
+         "\t\t\t\tTimer::sleep(1'000'000); // retry once per second\n"
+         "\t\t\t\tcontinue;\n"
+         "\t\t\t}\n"
+         "\t\t\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\t\t\tmsxhost_fujinet_link(1);\n"
+         "\t\t}\n",
+         "readSocket() connect")
+
+    # Received, on the reader thread, before any DBC handling.
+    swap("\t\telse if (n > 0) {\n",
+         "\t\telse if (n > 0) {\n"
+         "\t\t\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\t\t\tmsxhost_fujinet_trace(0, reinterpret_cast<const uint8_t*>(buf), size_t(n));\n",
+         "readSocket() receive")
+
+    # The cartridge's own DBC ack, on the reader thread.
+    swap("        auto res = sock_send(sock, (const char*)buf.data(), buf.size());\n"
+         "        (void)res; // ignore error\n",
+         "        auto res = sock_send(sock, (const char*)buf.data(), buf.size());\n"
+         "        // FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "        if (res > 0)\n"
+         "            msxhost_fujinet_trace(2, buf.data(), size_t(res));\n"
+         "        (void)res; // ignore error\n",
+         "fujiBusAck() send")
+
+    # The MSX's IO_PUTC bytes, on the openMSX thread.
+    swap("                auto res = sock_send(sock, reinterpret_cast<const char*>(&value), 1);\n"
+         "                (void)res; // ignore error\n",
+         "                auto res = sock_send(sock, reinterpret_cast<const char*>(&value), 1);\n"
+         "                // FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "                if (res > 0)\n"
+         "                    msxhost_fujinet_trace(1, &value, 1);\n"
+         "                (void)res; // ignore error\n",
+         "writeMem() IO_PUTC send")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: FujiNet trace and link hooks")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -1210,6 +1304,7 @@ def main() -> None:
     patch_freetype_pkgconfig_version_flag(stage_dir)
     patch_msysutils_python3_fixes(stage_dir)
     patch_windows_interface_macro(stage_dir)
+    patch_fujinet_trace_hook(stage_dir)
 
 
 if __name__ == "__main__":

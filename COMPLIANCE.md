@@ -74,7 +74,11 @@ Patches applied to the staged tree, all recorded in
    same per-frame CPU-side consumer openMSX's own AVI recorder already uses —
    and reuses `getScaledFrame()` (already in that file) to normalise to
    320×240/640×480 without any GL readback.
-3. **No touch-keyboard release-delay patch.** The Android sibling ports a
+3. **`src/serial/FujiNet.cc`: trace hooks for the debugger's FujiNet tab.**
+   The cartridge reports each byte its socket sends or receives, and the
+   socket connecting or closing, to `core/openmsx/msx_host.cc`. Its
+   behaviour is unchanged.
+4. **No touch-keyboard release-delay patch.** The Android sibling ports a
    release-delay into `EventDelay` because its on-screen keyboard injects a
    press+release back-to-back, faster than the MSX matrix scan. A desktop
    physical keyboard produces real down/up pairs with real dwell time, so this

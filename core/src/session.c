@@ -19,6 +19,7 @@
 #include <string.h>
 
 #include "compat.h"
+#include "fujitrace.h"
 #include "msx_host.hh"
 #include "session_internal.h"
 
@@ -62,6 +63,14 @@ static void on_core_frame(const uint32_t *px, int w, int h, void *user)
     memcpy(s->frame, px, n * sizeof(uint32_t));
     s->frame_serial++;
     pthread_mutex_unlock(&s->frame_mtx);
+}
+
+/* The FujiNet cartridge's socket bytes (msx_host.hh), on openMSX's thread or
+ * the cartridge's reader thread: into the debugger's FujiNet trace. */
+static void on_fujinet_bytes(int dir, const uint8_t *buf, size_t len,
+                             void *user)
+{
+    fujitrace_feed(((msxsession *)user)->fuji_trace, dir, buf, len);
 }
 
 int msxsession_copy_frame(msxsession *s, uint32_t *dst,
@@ -128,6 +137,7 @@ msxsession *msxsession_new(const msxsession_paths *paths)
     pthread_mutex_init(&s->lifecycle_mtx, NULL);
     pthread_mutex_init(&s->frame_mtx, NULL);
     settings_init(s);
+    s->fuji_trace = fujitrace_new();
 
     snprintf(s->cur_machine, sizeof(s->cur_machine), "%s",
              msxsession_get_str(s, "machine", MSXSESSION_MACHINE_MSX2));
@@ -139,6 +149,7 @@ void msxsession_free(msxsession *s)
     if (!s) return;
     msxsession_stop(s);
     msxdebug_destroy(s->debugger);
+    fujitrace_free(s->fuji_trace);
     msxsession_settings_flush(s);
     settings_free_all(s);
     pthread_mutex_destroy(&s->lifecycle_mtx);
@@ -198,6 +209,9 @@ int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
         fujinet_wait_for_boip(s, 10000);
 
     msxhost_set_frame_sink(on_core_frame, s);
+    /* The FujiNet trace is always on: it is cheap, and it is most useful
+     * about what happened before anyone thought to look. */
+    msxhost_set_fujinet_trace(on_fujinet_bytes, s);
     msxhost_select_machine(s->cur_machine);
 
     s->frame_serial = 0;
@@ -205,6 +219,7 @@ int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
     if (!msxhost_core_start()) {
         session_set_error(s, "%s", msxhost_last_error());
         msxhost_set_frame_sink(NULL, NULL);
+        msxhost_set_fujinet_trace(NULL, NULL);
         fujinet_stop(s);
         pthread_mutex_unlock(&s->lifecycle_mtx);
         return -1;
@@ -224,6 +239,7 @@ void msxsession_stop(msxsession *s)
     }
     msxhost_core_stop();
     msxhost_set_frame_sink(NULL, NULL);
+    msxhost_set_fujinet_trace(NULL, NULL);
     fujinet_stop(s);
     s->running = 0;
     pthread_mutex_unlock(&s->lifecycle_mtx);
@@ -381,6 +397,11 @@ int msxsession_import_media(msxsession *s, const char *src_path,
 int msxsession_fujinet_running(const msxsession *s)
 {
     return s->fujinet_running;
+}
+
+int msxsession_fujinet_link(const msxsession *s)
+{
+    return s->running && msxhost_fujinet_link_up();
 }
 
 int msxsession_fujinet_copy_log(msxsession *s, char *dst, int max)

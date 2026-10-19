@@ -1,10 +1,11 @@
 /*
  * Debugger window (AppKit): disassembly with click-to-toggle breakpoints,
- * editable registers, a memory view, breakpoints, and a VDP tab
+ * editable registers, a memory view, breakpoints, a VDP tab
  * (nametable/pattern/sprite/palette pictures, decoded register/status/
- * command-engine text, and a physical-VRAM hex editor), over the shared
- * msxdebug/msxvdp engines -- the same content as the GNOME/KDE debugger
- * windows, built from plain AppKit views.
+ * command-engine text, and a physical-VRAM hex editor), and a FujiNet tab
+ * (every FujiBus packet between the MSX and FujiNet, both ways, with hex),
+ * over the shared msxdebug/msxvdp engines -- the same content as the
+ * GNOME/KDE debugger windows, built from plain AppKit views.
  *
  * Ported from fujinet-go-coco-desktop's DebuggerWindow.m, not copied
  * line-for-line: msxdebug.h's shape differs from cocodebug.h in ways that
@@ -14,7 +15,8 @@
  *     engine's own poll thread (see core/debugger/debugger.c), marshaled
  *     to the main queue with dispatch_async -- unlike cocodebug's poll-
  *     only design (XRoar's instruction-hook context makes a cross-thread
- *     callback unsafe there), so this has no NSTimer poll loop at all.
+ *     callback unsafe there), so nothing here polls for stops. The one
+ *     NSTimer refreshes the FujiNet tab twice a second while it shows.
  *   * Registers and memory ARE editable here (msxdebug_set_regs,
  *     msxdebug_write_mem both exist, unlike cocodebug's read-only pair),
  *     matching the GNOME/KDE debugger windows' own Enter-applies-while-
@@ -50,6 +52,7 @@
 #define VRAM_ROWS 16
 #define VRAM_PAGE (VRAM_ROWS * 16)
 #define POKE_MAX 64
+#define TRACE_MAX 512
 
 static DebuggerWindow *g_debugger;
 
@@ -138,7 +141,7 @@ static msxvdp_chip chipFromMachine(const char *machineId)
     return MSXVDP_CHIP_V9938;
 }
 
-@interface DebuggerWindow () <NSWindowDelegate>
+@interface DebuggerWindow () <NSWindowDelegate, NSTabViewDelegate>
 - (instancetype)initWithSession:(msxsession *)session;
 @end
 
@@ -173,6 +176,15 @@ static msxvdp_chip chipFromMachine(const char *machineId)
     NSTextField *_vramStatus;
     NSTextView *_vramView;
     uint32_t _vramBase;
+
+    NSTabView *_tabs;
+    NSTabViewItem *_fujiTab;
+    NSTextField *_fujiNote;
+    NSTextView *_fujiText;
+    NSTextView *_fujiState;
+    int _fujiCount;           /* what the log shows: -1 forces a rebuild */
+    uint64_t _fujiLast;
+    NSTimer *_tick;
 }
 
 + (void)showForSession:(msxsession *)session
@@ -218,10 +230,37 @@ static void stopCallback(void *ud, msxdebug_stop_reason reason, uint16_t pc)
     _followPc = YES;
     _memBase = 0;
     _vramBase = 0;
+    _fujiCount = -1;
     [self buildWindow];
     msxdebug_set_stop_callback(_dbg, stopCallback, (__bridge void *)self);
     [self refreshAll];
+
+    __weak DebuggerWindow *weakSelf = self;
+    _tick = [NSTimer timerWithTimeInterval:0.5 repeats:YES block:^(NSTimer *t) {
+        (void)t;
+        [weakSelf onTick];
+    }];
+    [[NSRunLoop mainRunLoop] addTimer:_tick forMode:NSRunLoopCommonModes];
     return self;
+}
+
+- (void)dealloc
+{
+    [_tick invalidate];
+}
+
+/* The FujiNet tab twice a second while it shows. */
+- (void)onTick
+{
+    if (_window.isVisible && _tabs.selectedTabViewItem == _fujiTab)
+        [self refreshFujinet:NO];
+}
+
+- (void)tabView:(NSTabView *)tabView didSelectTabViewItem:(NSTabViewItem *)item
+{
+    (void)tabView;
+    if (item == _fujiTab)
+        [self refreshFujinet:NO];
 }
 
 /* ---- construction helpers ---------------------------------------------------- */
@@ -240,6 +279,30 @@ static NSTextView *monoView(NSScrollView **scrollOut)
     scroll.documentView = view;
     *scrollOut = scroll;
     return view;
+}
+
+/* Whether a view's reader is at its end (a log then follows new lines). */
+static BOOL atEnd(NSTextView *view)
+{
+    NSScrollView *scroll = view.enclosingScrollView;
+    if (!scroll) return YES;
+    return NSMaxY(scroll.contentView.documentVisibleRect) >= NSHeight(view.frame) - 4;
+}
+
+/* Replaces a view's text where the reader left it (a refresh must not throw
+ * a scrolled view back to its top), or, following, at its end. */
+static void setText(NSTextView *view, NSString *text, BOOL follow)
+{
+    if (![view.string isEqualToString:text]) {
+        NSScrollView *scroll = view.enclosingScrollView;
+        const NSPoint at = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
+        view.string = text;
+        if (scroll && !follow) {
+            [scroll.contentView scrollToPoint:at];
+            [scroll reflectScrolledClipView:scroll.contentView];
+        }
+    }
+    if (follow) [view scrollRangeToVisible:NSMakeRange(view.string.length, 0)];
 }
 
 - (NSButton *)button:(NSString *)title action:(SEL)sel
@@ -353,9 +416,16 @@ static NSTextView *monoView(NSScrollView **scrollOut)
     vdpTab.label = @"VDP";
     vdpTab.view = vdpPage;
 
+    _fujiTab = [[NSTabViewItem alloc] initWithIdentifier:@"fujinet"];
+    _fujiTab.label = @"FujiNet";
+    _fujiTab.view = [self buildFujinetPage];
+
     NSTabView *tabs = [[NSTabView alloc] init];
     [tabs addTabViewItem:cpuTab];
     [tabs addTabViewItem:vdpTab];
+    [tabs addTabViewItem:_fujiTab];
+    tabs.delegate = self;
+    _tabs = tabs;
 
     NSStackView *root = [NSStackView stackViewWithViews:@[ toolbar, tabs ]];
     root.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -373,6 +443,55 @@ static NSTextView *monoView(NSScrollView **scrollOut)
     if (getenv("MSX_DEBUGGER_TAB") &&
         strcmp(getenv("MSX_DEBUGGER_TAB"), "vdp") == 0)
         [tabs selectTabViewItem:vdpTab];
+    else if (getenv("MSX_DEBUGGER_TAB") &&
+             strcmp(getenv("MSX_DEBUGGER_TAB"), "fujinet") == 0)
+        [tabs selectTabViewItem:_fujiTab];
+}
+
+/* FujiNet tab: the packet log (a note and Clear over it) on the left, the
+ * cartridge's link and counts on the right. */
+- (NSView *)buildFujinetPage
+{
+    _fujiNote = [self label:@""];
+    _fujiNote.textColor = [NSColor secondaryLabelColor];
+    _fujiNote.lineBreakMode = NSLineBreakByTruncatingTail;
+    [_fujiNote setContentHuggingPriority:1
+                          forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_fujiNote setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                        forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSButton *clear = [self button:@"Clear" action:@selector(fujiClear:)];
+    NSStackView *row = [NSStackView stackViewWithViews:@[ _fujiNote, clear ]];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.distribution = NSStackViewDistributionFill;
+
+    NSScrollView *fujiScroll, *stateScroll;
+    _fujiText = monoView(&fujiScroll);
+    _fujiState = monoView(&stateScroll);
+
+    NSStackView *left = [NSStackView stackViewWithViews:@[
+        [self label:@"FujiBus packets (SLIP-decoded)"], row, fujiScroll
+    ]];
+    left.orientation = NSUserInterfaceLayoutOrientationVertical;
+    left.alignment = NSLayoutAttributeLeading;
+    left.spacing = 6;
+    [row.widthAnchor constraintEqualToAnchor:left.widthAnchor].active = YES;
+    [fujiScroll.widthAnchor constraintEqualToAnchor:left.widthAnchor].active = YES;
+    [left.widthAnchor constraintGreaterThanOrEqualToConstant:560].active = YES;
+
+    NSStackView *right = [NSStackView stackViewWithViews:@[
+        [self label:@"FujiNet cartridge"], stateScroll
+    ]];
+    right.orientation = NSUserInterfaceLayoutOrientationVertical;
+    right.alignment = NSLayoutAttributeLeading;
+    right.spacing = 6;
+    [stateScroll.widthAnchor constraintEqualToAnchor:right.widthAnchor].active = YES;
+    [right.widthAnchor constraintGreaterThanOrEqualToConstant:320].active = YES;
+
+    NSSplitView *split = [[NSSplitView alloc] init];
+    split.vertical = YES;
+    [split addArrangedSubview:left];
+    [split addArrangedSubview:right];
+    return split;
 }
 
 - (NSGridView *)buildRegsGrid
@@ -589,6 +708,13 @@ static NSTextView *monoView(NSScrollView **scrollOut)
     [self refreshVdp];
 }
 
+- (void)fujiClear:(id)sender
+{
+    (void)sender;
+    msxdebug_fujinet_trace_clear(_dbg);
+    [self refreshFujinet:YES];
+}
+
 - (void)vramPagePrev:(id)sender
 {
     (void)sender;
@@ -628,6 +754,7 @@ static NSTextView *monoView(NSScrollView **scrollOut)
     [self refreshMem];
     [self refreshBps];
     [self refreshVdp];
+    [self refreshFujinet:NO];
 }
 
 - (void)refreshDisasm
@@ -744,6 +871,46 @@ static NSTextView *monoView(NSScrollView **scrollOut)
 
     msxvdp_format_hex(&snap, _vramBase, VRAM_ROWS, text, (int)sizeof(text));
     _vramView.string = [NSString stringWithUTF8String:text];
+}
+
+/* The log is rebuilt only when it changed: a new packet, or a repeat
+ * folded into the newest. Built as UTF-8 first: %s in an NSString format is
+ * not UTF-8. */
+- (void)refreshFujinet:(BOOL)force
+{
+    static msx_fuji_packet p[TRACE_MAX];
+    static char t[TRACE_MAX * 320 + 128]; /* an entry is at most ~300 */
+    static char state[2048];
+    int n = msxdebug_fujinet_trace(_dbg, p, TRACE_MAX);
+    size_t len = 0;
+
+    if (!msxsession_fujinet_running(_session))
+        _fujiNote.stringValue = @"FujiNet is off (disabled, or its runtime did not start).";
+    else
+        _fujiNote.stringValue = msxsession_fujinet_link(_session)
+                                    ? @"FujiNet is on, cartridge connected."
+                                    : @"FujiNet is on, cartridge not connected.";
+    state[0] = '\0';
+    msxdebug_fujinet_state(_dbg, state, (int)sizeof(state));
+    setText(_fujiState, [NSString stringWithUTF8String:state] ?: @"", NO);
+
+    if (!force && n == _fujiCount && (n == 0 || p[n - 1].serial == _fujiLast))
+        return;
+    const BOOL follow = force || _fujiCount < 0 || atEnd(_fujiText);
+    _fujiCount = n;
+    _fujiLast = n > 0 ? p[n - 1].serial : 0;
+    t[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        len += (size_t)snprintf(t + len, sizeof(t) - len, "%s%s\n     ",
+                                i ? "\n" : "", p[i].text);
+        for (int k = 0; k < p[i].nbytes && k < (int)sizeof(p[i].data); k++)
+            len += (size_t)snprintf(t + len, sizeof(t) - len, "%02X ", p[i].data[k]);
+        if (p[i].nbytes > (int)sizeof(p[i].data))
+            len += (size_t)snprintf(t + len, sizeof(t) - len, "\xe2\x80\xa6");
+    }
+    if (n == 0)
+        snprintf(t, sizeof(t), "(no FujiBus packets since the trace was cleared)");
+    setText(_fujiText, [NSString stringWithUTF8String:t] ?: @"", follow);
 }
 
 @end

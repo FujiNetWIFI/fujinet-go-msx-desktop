@@ -25,6 +25,10 @@
  * an RPC call is safe and used freely below to keep control operations
  * atomic with respect to the poll thread.
  *
+ * The FujiNet trace is not this engine's: the session owns it from
+ * msxsession_new (fujitrace.c), so it records from the first boot, and the
+ * calls at the end of this file only read it.
+ *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -37,6 +41,7 @@
 
 #include "../openmsx/msx_host.hh"
 #include "../src/session_internal.h"
+#include "fujitrace.h"
 #include "msxdebug.h"
 #include "symbols.h"
 #include "z80dasm.h"
@@ -555,4 +560,27 @@ int msxdebug_symbol_find(msxdebug *d, const char *name, uint16_t *addr)
 {
     if (!d) return 0;
     return symtabs_find(&d->syms, name, addr);
+}
+
+/* ---- FujiNet ---------------------------------------------------------------- */
+
+int msxdebug_fujinet_trace(msxdebug *d, msx_fuji_packet *out, int max)
+{
+    if (!d) return 0;
+    return fujitrace_packets(d->session->fuji_trace, out, max);
+}
+
+void msxdebug_fujinet_trace_clear(msxdebug *d)
+{
+    if (!d) return;
+    fujitrace_clear(d->session->fuji_trace);
+}
+
+int msxdebug_fujinet_state(msxdebug *d, char *dst, int dstsz)
+{
+    if (!d) return 0;
+    return fujitrace_format_state(d->session->fuji_trace,
+                                  msxsession_fujinet_running(d->session),
+                                  msxsession_fujinet_link(d->session),
+                                  MSXSESSION_BOIP_PORT, dst, dstsz);
 }

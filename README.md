@@ -62,7 +62,9 @@ Breakpoints, pause/step into/over/out, run-to, a Z80 disassembler, memory and
 register views, and a decoded VDP pane that understands the TMS9918A (MSX1),
 V9938 (MSX2) and V9958 (MSX2+) — modes, table addressing, the palette RAM,
 sprite mode 2, and the V9938/V9958 command engine (VRAM-to-VRAM blit unit).
-Available in every frontend over the one shared engine; it extends
+A FujiNet tab shows every FujiBus packet between the MSX and FujiNet, both
+ways, with hex, recorded from the first boot whether or not the debugger is
+open. Available in every frontend over the one shared engine; it extends
 `fujinet-go-adam-desktop`'s TMS9918A visualizer to the V9938/V9958.
 
 ## Building

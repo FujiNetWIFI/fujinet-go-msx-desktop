@@ -70,6 +70,7 @@ struct msxsession {
 
     /* ---- debugger (M6) ---- */
     msxdebug *debugger;
+    struct fujitrace *fuji_trace; /* from msxsession_new, not the debugger's */
 
     char last_error[512];
 };

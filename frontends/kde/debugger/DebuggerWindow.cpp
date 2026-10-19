@@ -30,6 +30,9 @@
  *     the booted machine id (chipFromMachine, the same heuristic the
  *     other three frontends use), since msxvdp_snapshot needs it
  *     explicitly rather than reading it from the hardware itself.
+ *   * A "FujiNet" dock, tabbed with the VDP one: every FujiBus packet
+ *     between the MSX and FujiNet, both ways, with hex, beside the
+ *     cartridge's link and counts. The other frontends' FujiNet tab.
  *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -51,7 +54,9 @@
 #include <QPointer>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QShortcut>
+#include <QSplitter>
 #include <QTextBlock>
 #include <QTimer>
 #include <QToolBar>
@@ -66,6 +71,7 @@ constexpr int kMemRows = 16;
 constexpr int kVramRows = 16;
 constexpr int kVramPage = kVramRows * 16;
 constexpr int kPokeMax = 64;
+constexpr int kTraceMax = 512;
 const char *const kRegNames[8] = {"AF", "BC", "DE", "HL",
                                   "IX", "IY", "SP", "PC"};
 
@@ -117,6 +123,35 @@ QPlainTextEdit *monoView()
     return v;
 }
 
+QLabel *titleLabel(const QString &text)
+{
+    auto *l = new QLabel(text);
+    QFont f = l->font();
+    f.setBold(true);
+    l->setFont(f);
+    return l;
+}
+
+/* Whether a view's reader is at its end (a log then follows new lines). */
+bool atEnd(QPlainTextEdit *v)
+{
+    return v->verticalScrollBar()->value() >= v->verticalScrollBar()->maximum() - 1;
+}
+
+/* Replaces a view's text where the reader left it (a refresh must not throw
+ * a scrolled view back to its top), or, following, at its end. */
+void setText(QPlainTextEdit *v, const QString &text, bool follow = false)
+{
+    if (v->toPlainText() == text) {
+        if (follow) v->verticalScrollBar()->setValue(v->verticalScrollBar()->maximum());
+        return;
+    }
+    const int top = v->verticalScrollBar()->value(), left = v->horizontalScrollBar()->value();
+    v->setPlainText(text);
+    v->verticalScrollBar()->setValue(follow ? v->verticalScrollBar()->maximum() : top);
+    v->horizontalScrollBar()->setValue(left);
+}
+
 QPointer<DebuggerWindow> g_singleton;
 
 void stop_trampoline(void *ud, msxdebug_stop_reason reason, uint16_t pc)
@@ -162,15 +197,23 @@ DebuggerWindow::DebuggerWindow(QWidget *parent, msxsession *session)
             refreshVdp();
             refreshRegs();
         }
+        /* The FujiNet dock twice a second while it shows. */
+        if (m_fujiShown && ++m_fujiTicks >= 5) {
+            m_fujiTicks = 0;
+            refreshFujinet(false);
+        }
     });
     m_tick->start(100);
     refreshAll();
 
-    /* Dev affordance shared with the other frontends. */
+    /* Dev affordance shared with the other frontends: MSX_DEBUGGER_TAB=vdp
+     * or =fujinet raises that dock. */
     const char *tab = std::getenv("MSX_DEBUGGER_TAB");
-    if (tab && std::strcmp(tab, "vdp") == 0) {
+    if (tab && (std::strcmp(tab, "vdp") == 0 || std::strcmp(tab, "fujinet") == 0)) {
+        const QString title = std::strcmp(tab, "vdp") == 0 ? QStringLiteral("VDP")
+                                                           : QStringLiteral("FujiNet");
         for (QDockWidget *d : findChildren<QDockWidget *>())
-            if (d->windowTitle() == QStringLiteral("VDP"))
+            if (d->windowTitle() == title)
                 d->raise();
     }
 }
@@ -420,6 +463,56 @@ void DebuggerWindow::buildUi()
     vdpScroll->setWidget(vdp);
     vdpDock->setWidget(vdpScroll);
     addDockWidget(Qt::BottomDockWidgetArea, vdpDock);
+
+    /* FujiNet, tabbed behind the VDP dock. Qt hides a dock whose tab is not
+     * selected, and says so through visibilityChanged. */
+    m_fujiDock = new QDockWidget(QStringLiteral("FujiNet"), this);
+    m_fujiDock->setWidget(buildFujinet());
+    tabifyDockWidget(vdpDock, m_fujiDock);
+    vdpDock->raise();
+    connect(m_fujiDock, &QDockWidget::visibilityChanged, this, [this](bool shown) {
+        m_fujiShown = shown;
+        if (shown)
+            refreshFujinet(false);
+    });
+}
+
+/* The packet log (a note and Clear over it) on the left, the cartridge's
+ * link and counts on the right. */
+QWidget *DebuggerWindow::buildFujinet()
+{
+    auto *split = new QSplitter(Qt::Horizontal);
+    auto *left = new QWidget;
+    auto *lv = new QVBoxLayout(left);
+    lv->addWidget(titleLabel(QStringLiteral("FujiBus packets (SLIP-decoded)")));
+    auto *row = new QHBoxLayout;
+    m_fujiNote = new QLabel;
+    m_fujiNote->setStyleSheet(QStringLiteral("color: gray;"));
+    m_fujiNote->setWordWrap(true);
+    auto *clear = new QPushButton(QStringLiteral("Clear"));
+    connect(clear, &QPushButton::clicked, this, [this] {
+        msxdebug_fujinet_trace_clear(m_dbg);
+        refreshFujinet(true);
+    });
+    row->addWidget(m_fujiNote, 1);
+    row->addWidget(clear);
+    lv->addLayout(row);
+    m_fujiText = monoView();
+    lv->addWidget(m_fujiText, 1);
+    left->setMinimumWidth(560);
+
+    auto *right = new QWidget;
+    auto *rv = new QVBoxLayout(right);
+    rv->addWidget(titleLabel(QStringLiteral("FujiNet cartridge")));
+    m_fujiState = monoView();
+    rv->addWidget(m_fujiState, 1);
+    right->setMinimumWidth(320);
+    split->addWidget(left);
+    split->addWidget(right);
+    split->setStretchFactor(0, 3);
+    split->setStretchFactor(1, 2);
+    split->setChildrenCollapsible(false);
+    return split;
 }
 
 bool DebuggerWindow::parseAddr(const QString &text, quint16 *out)
@@ -478,6 +571,7 @@ void DebuggerWindow::refreshAll()
     refreshMem();
     refreshBps();
     refreshVdp();
+    refreshFujinet(false);
     m_pauseBtn->setText(msxdebug_is_paused(m_dbg)
                             ? QStringLiteral("Continue (F5)")
                             : QStringLiteral("Pause (F5)"));
@@ -662,4 +756,41 @@ void DebuggerWindow::vramPage(int delta)
 {
     m_vramBase = quint32(qint64(m_vramBase) + delta * kVramPage);
     refreshVdp();
+}
+
+/* The log is rebuilt only when it changed: a new packet, or a repeat folded
+ * into the newest. */
+void DebuggerWindow::refreshFujinet(bool force)
+{
+    static msx_fuji_packet p[kTraceMax];
+    static char state[2048];
+    const int n = msxdebug_fujinet_trace(m_dbg, p, kTraceMax);
+    if (!msxsession_fujinet_running(m_session))
+        m_fujiNote->setText(QStringLiteral("FujiNet is off (disabled, or its runtime did not start)."));
+    else
+        m_fujiNote->setText(msxsession_fujinet_link(m_session)
+                                ? QStringLiteral("FujiNet is on, cartridge connected.")
+                                : QStringLiteral("FujiNet is on, cartridge not connected."));
+    state[0] = '\0';
+    msxdebug_fujinet_state(m_dbg, state, int(sizeof(state)));
+    setText(m_fujiState, QString::fromUtf8(state));
+
+    if (!force && n == m_fujiCount && (n == 0 || p[n - 1].serial == m_fujiLast))
+        return;
+    const bool follow = force || m_fujiCount < 0 || atEnd(m_fujiText);
+    m_fujiCount = n;
+    m_fujiLast = n > 0 ? p[n - 1].serial : 0;
+    QString t;
+    for (int i = 0; i < n; ++i) {
+        if (i)
+            t += QLatin1Char('\n');
+        t += QString::fromUtf8(p[i].text) + QStringLiteral("\n     ");
+        for (int k = 0; k < p[i].nbytes && k < int(sizeof(p[i].data)); k++)
+            t += QStringLiteral("%1 ").arg(p[i].data[k], 2, 16, QLatin1Char('0')).toUpper();
+        if (p[i].nbytes > int(sizeof(p[i].data)))
+            t += QStringLiteral("…");
+    }
+    if (n == 0)
+        t = QStringLiteral("(no FujiBus packets since the trace was cleared)");
+    setText(m_fujiText, t, follow);
 }

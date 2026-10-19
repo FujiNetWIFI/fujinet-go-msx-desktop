@@ -12,6 +12,7 @@
 #include "msxvdp.h"
 
 class QComboBox;
+class QDockWidget;
 class QLabel;
 class QLineEdit;
 class QPlainTextEdit;
@@ -38,6 +39,8 @@ private:
     void refreshMem();
     void refreshBps();
     void refreshVdp();
+    void refreshFujinet(bool force);
+    QWidget *buildFujinet();
     void onStopped(int reason, quint16 pc);
     void pauseContinue();
     bool parseAddr(const QString &text, quint16 *out);
@@ -73,6 +76,15 @@ private:
     QLabel *m_vramStatus;
     QPlainTextEdit *m_vramView;
     quint32 m_vramBase = 0;
+
+    QDockWidget *m_fujiDock = nullptr;
+    QLabel *m_fujiNote = nullptr;
+    QPlainTextEdit *m_fujiText = nullptr;
+    QPlainTextEdit *m_fujiState = nullptr;
+    bool m_fujiShown = false;
+    int m_fujiCount = -1; /* what the log shows: -1 forces a rebuild */
+    quint64 m_fujiLast = 0;
+    int m_fujiTicks = 0;
 
     QTimer *m_tick;
 };

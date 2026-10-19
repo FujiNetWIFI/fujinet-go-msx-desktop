@@ -101,6 +101,14 @@ struct {
     bool ok = false;
 } g_rpc;
 
+// FujiNet trace -- see msxhost_set_fujinet_trace(). The cartridge reports
+// from two threads (openMSX's and its socket reader), so the sink is called
+// under this lock.
+std::mutex g_fuji_trace_mutex;
+MsxFujiTraceSink g_fuji_trace_sink = nullptr;
+void* g_fuji_trace_user = nullptr;
+std::atomic<int> g_fuji_link{0};
+
 void set_error(const std::string& msg) {
     std::fprintf(stderr, "msx_host: %s\n", msg.c_str());
     g_last_error = msg;
@@ -419,12 +427,35 @@ extern "C" void msxhost_debug_pump(void) {
     drain_all();
 }
 
+// Called from the patched openmsx::FujiNet (see
+// tools/openmsx/patches/patch-staged-tree.py) with each run of bytes its
+// socket sent or received -- dir as in msx_host.hh -- and whenever that
+// socket connects (up = 1) or closes (up = 0).
+extern "C" void msxhost_fujinet_trace(int dir, const uint8_t* buf, size_t len) {
+    std::lock_guard<std::mutex> lk(g_fuji_trace_mutex);
+    if (g_fuji_trace_sink) g_fuji_trace_sink(dir, buf, len, g_fuji_trace_user);
+}
+
+extern "C" void msxhost_fujinet_link(int up) {
+    g_fuji_link.store(up ? 1 : 0);
+}
+
 // --- C API ----------------------------------------------------------------
 extern "C" {
 
 void msxhost_set_frame_sink(MsxFrameSink sink, void* user) {
     g_frame_sink = sink;
     g_frame_user = user;
+}
+
+void msxhost_set_fujinet_trace(MsxFujiTraceSink sink, void* user) {
+    std::lock_guard<std::mutex> lk(g_fuji_trace_mutex);
+    g_fuji_trace_sink = sink;
+    g_fuji_trace_user = user;
+}
+
+int msxhost_fujinet_link_up(void) {
+    return g_fuji_link.load();
 }
 
 void msxhost_select_machine(const char* machine_id) {

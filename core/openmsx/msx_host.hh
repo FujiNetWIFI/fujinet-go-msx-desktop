@@ -37,6 +37,7 @@
 /* Included from both C (core/src/session.c) and C++ (this file's own .cc):
  * plain C headers and an #ifdef-guarded extern "C" block, same pattern as
  * the sibling repos' <target>debug.h headers. */
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -159,6 +160,20 @@ int msxhost_execute_sync(const char* command, char* result_out, int result_max);
  * human-readable failure reason matters). */
 int msxhost_execute_sync_binary(const char* command, uint8_t* result_out,
                                 int result_max, int* result_len_out);
+
+/* --- FujiNet trace (the debugger's FujiNet tab) ----------------------------
+ * The patched openMSX FujiNet cartridge (src/serial/FujiNet.cc, see
+ * patch-staged-tree.py) reports every byte it sends or receives on its
+ * socket to FujiNet. dir is one of core/debugger/fujitrace.h's
+ * FUJITRACE_*: 0 received (the socket reader thread), 1 an MSX IO_PUTC
+ * byte sent (the openMSX thread), 2 the cartridge's own DBC ack sent (the
+ * reader thread). The sink runs on those threads, under a lock this host
+ * holds, so it is never called twice at once. NULL removes it. */
+typedef void (*MsxFujiTraceSink)(int dir, const uint8_t* buf, size_t len, void* user);
+void msxhost_set_fujinet_trace(MsxFujiTraceSink sink, void* user);
+
+/* Whether the cartridge's socket to FujiNet is connected. */
+int msxhost_fujinet_link_up(void);
 
 #ifdef __cplusplus
 }  // extern "C"

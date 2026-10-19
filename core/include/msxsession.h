@@ -193,6 +193,9 @@ void msxsession_reset(msxsession *s);
 
 /* ---- FujiNet (M3) ---------------------------------------------------------*/
 int         msxsession_fujinet_running(const msxsession *s);
+/* Whether openMSX's FujiNet cartridge is connected to FujiNet (its socket
+ * to MSXSESSION_BOIP_PORT is up). */
+int         msxsession_fujinet_link(const msxsession *s);
 const char *msxsession_fujinet_webui_url(const msxsession *s);
 int         msxsession_fujinet_copy_log(msxsession *s, char *dst, int max);
 

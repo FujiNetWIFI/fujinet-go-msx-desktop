@@ -13,7 +13,9 @@
  * Tcl round-trip per instruction would be many orders of magnitude too
  * slow to keep up with a 3.5MHz Z80 -- see msxdebug_step_over/_out below
  * for how step-over/step-out are built instead (a conditional one-shot
- * breakpoint, since openMSX has no native step-over).
+ * breakpoint, since openMSX has no native step-over). The one trace it
+ * does keep is FujiNet's: the cartridge's bytes, from a hook in openMSX's
+ * FujiNet device (see msxdebug_fujinet_trace below).
  *
  * Threading: control calls (pause/resume/step/breakpoints) are safe from
  * the UI thread and block until openMSX has confirmed the new state (they
@@ -137,6 +139,28 @@ int msxdebug_disassemble(msxdebug *d, uint16_t addr, int count,
 int msxdebug_symbols_load(msxdebug *d, const char *path, const char *table);
 const char *msxdebug_symbol_at(msxdebug *d, uint16_t addr, uint16_t *offset);
 int msxdebug_symbol_find(msxdebug *d, const char *name, uint16_t *addr);
+
+/* ---- FujiNet: the cartridge's socket, as FujiBus packets -------------------
+ * Always on from msxsession_start, debugger open or not. The patched
+ * openMSX FujiNet cartridge (src/serial/FujiNet.cc, see
+ * tools/openmsx/patches/patch-staged-tree.py) hands every byte it sends or
+ * receives to core/debugger/fujitrace.c, which SLIP-decodes them. The last
+ * 512 packets are kept; identical exchanges in a row fold into one entry.
+ * DBC packets (device FF) are the cartridge's own: FujiNet pushing a ROM
+ * into it, and its acks. The MSX never sees them. */
+typedef struct {
+    uint64_t serial;
+    int      to_host;       /* 1: FujiNet -> MSX (or the cartridge), 0: -> FujiNet */
+    int      device, command, length;   /* from the FujiBus header, -1 if short */
+    int      nbytes;
+    uint8_t  data[64];      /* the decoded packet's first bytes */
+    char     text[96];      /* "MSX -> FujiNet 70 E8 GET ADAPTERCONFIG (7 bytes)" */
+    uint32_t repeat;        /* N when N identical exchanges in a row folded into this one */
+} msx_fuji_packet;
+int  msxdebug_fujinet_trace(msxdebug *d, msx_fuji_packet *out, int max);  /* newest max, oldest first */
+void msxdebug_fujinet_trace_clear(msxdebug *d);
+/* The cartridge's link and byte/packet counts, as text lines. */
+int  msxdebug_fujinet_state(msxdebug *d, char *dst, int dstsz);
 
 #ifdef __cplusplus
 }

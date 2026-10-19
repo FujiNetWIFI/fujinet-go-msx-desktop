@@ -20,6 +20,10 @@
  * for it is a portable, non-proc-parsing way to prove the round trip
  * without a display or a human watching the CONFIG host list populate.
  *
+ * Then the debugger's FujiNet trace (core/debugger/fujitrace.c, fed by the
+ * patched cartridge) has to show the MSX talking over that link: at least
+ * one request from the MSX and one reply from FujiNet.
+ *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -28,8 +32,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "msxdebug.h"
 #include "msxsession.h"
 #include "test_sleep.h"
+
+static msx_fuji_packet trace[512];
 
 /* 'c' is ASCII 0x63 -- an X11 keysym and an SDL keycode in one, per
  * core/src/input_map.c's Latin-1 passthrough. */
@@ -44,6 +51,7 @@ int main(void)
     int rc = 0;
     int waited_ms;
     int booted = 0;
+    int linked = 0;
     char log[8192];
 
     s = msxsession_new(NULL);
@@ -120,13 +128,38 @@ int main(void)
             strstr(log, "BoIPChannel connected")) {
             printf("fujinet_smoke: BOIP connection confirmed after %d ms\n",
                    waited_ms);
+            linked = 1;
+            break;
+        }
+        sleep_ms(200);
+    }
+    if (!linked) {
+        fprintf(stderr, "fujinet_smoke: no BOIP connection seen within %d ms; "
+                        "last log tail:\n%s\n", waited_ms, log);
+        rc = 1;
+        goto done;
+    }
+
+    /* The trace: a request the MSX sent and a reply it got. */
+    for (waited_ms = 0; waited_ms < 20000; waited_ms += 200) {
+        int n = msxdebug_fujinet_trace(msxsession_debugger(s), trace, 512);
+        int i, req = 0, reply = 0;
+        for (i = 0; i < n; i++) {
+            if (trace[i].device == 0xFF) continue; /* DBC: not the MSX's */
+            if (trace[i].to_host) reply++;
+            else req++;
+        }
+        if (req && reply && msxsession_fujinet_link(s)) {
+            printf("fujinet_smoke: trace shows %d request(s), %d reply(ies) "
+                   "after %d ms, e.g. %s\n", req, reply, waited_ms,
+                   trace[0].text);
             goto done;
         }
         sleep_ms(200);
     }
-
-    fprintf(stderr, "fujinet_smoke: no BOIP connection seen within %d ms; "
-                    "last log tail:\n%s\n", waited_ms, log);
+    fprintf(stderr, "fujinet_smoke: the FujiNet trace never showed a "
+                    "request and a reply (link %d)\n",
+            msxsession_fujinet_link(s));
     rc = 1;
 
 done:

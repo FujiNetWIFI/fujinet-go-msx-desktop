@@ -46,6 +46,7 @@ add_library(msxsession STATIC
   debugger/symbols.c
   debugger/symbols_builtin.c
   debugger/debugger.c
+  debugger/fujitrace.c
   debugger/msxvdpview.c
 )
 target_link_libraries(msxsession PUBLIC openmsx-lib ${MSX_SDL2_LINK_LIB} Threads::Threads)
@@ -162,6 +163,14 @@ add_executable(dasm_test tests/dasm_test.c)
 target_link_libraries(dasm_test PRIVATE msxsession)
 target_include_directories(dasm_test PRIVATE "${CMAKE_SOURCE_DIR}/core/debugger")
 add_test(NAME dasm_test COMMAND dasm_test)
+
+# The debugger's FujiNet trace decoder on made-up bytes: both directions,
+# frames split across feeds, DBC packets, folding of repeats. No openMSX
+# run and no FujiNet runtime, so it runs everywhere.
+add_executable(fujitrace_test tests/fujitrace_test.c)
+target_link_libraries(fujitrace_test PRIVATE msxsession)
+target_include_directories(fujitrace_test PRIVATE "${CMAKE_SOURCE_DIR}/core/debugger")
+add_test(NAME fujitrace_test COMMAND fujitrace_test)
 
 # M6 gate: the debugger engine (pause/step/breakpoints/disassembly) against
 # a real running boot, including a persistent breakpoint firing
