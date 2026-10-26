@@ -2,9 +2,9 @@
  * FujiNet Go MSX -- native Win32 frontend.
  *
  * Mirrors the GNOME/KDE/macOS frontends over the shared msxsession API: a
- * GDI-blitted display letterboxed to 4:3, a present thread that feeds the
- * session's (advisory-only, see msxsession.h) vsync notification from
- * DwmFlush, full keyboard mapping, a menu bar, media import, and the
+ * Direct3D 11 display (display.c, GDI as the fallback) letterboxed to 4:3
+ * whose render thread feeds the session's (advisory-only, see msxsession.h)
+ * vsync notification, full keyboard mapping, a menu bar, media import, and the
  * FujiNet configuration (default browser -- no embedded WebView2 in this
  * first pass) and console-log windows.
  *
@@ -33,18 +33,16 @@
 
 #include <windows.h>
 #include <commdlg.h>
-#include <dwmapi.h>
 #include <shellapi.h>
 
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "msxsession.h"
 #include "debugger/dbg_window.h"
+#include "display.h"
 #include "resource.h"
 
 static msxsession *g_session;
@@ -53,15 +51,7 @@ static HMENU g_menu;
 static HWND g_log_window;
 static HWND g_log_edit;
 
-/* Frame hand-off: the present thread copies the latest frame under this
- * lock; WM_PAINT blits it. Fixed size -- see this file's header comment. */
-static CRITICAL_SECTION g_fb_lock;
-static uint32_t g_frame[MSXSESSION_FB_WIDTH * MSXSESSION_FB_HEIGHT];
-static int g_have_frame;
-static uint64_t g_serial;
-
-static pthread_t g_present_thread;
-static volatile int g_present_run;
+static HWND g_display;
 static int g_fullscreen;
 static WINDOWPLACEMENT g_prev_placement = {sizeof(g_prev_placement)};
 
@@ -83,98 +73,14 @@ static int machine_index(const char *machine_id)
     return -1;
 }
 
-static int64_t monotonic_ns(void)
+/* The picture is a child window drawn by display.c; it fills the client. */
+static void layout_display(void)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
-}
-
-/* ---- present thread: vsync notification + frame hand-off ------------------ */
-
-static void *present_main(void *arg)
-{
-    (void)arg;
-    while (g_present_run) {
-        BOOL composited = FALSE;
-        DwmIsCompositionEnabled(&composited);
-        if (composited && SUCCEEDED(DwmFlush())) {
-            /* DwmFlush returned at the compositor's vsync. */
-        } else {
-            Sleep(16); /* no DWM composition (RDP, safe mode): wall clock */
-        }
-        msxsession_notify_vsync(g_session, monotonic_ns());
-
-        EnterCriticalSection(&g_fb_lock);
-        {
-            int got = msxsession_copy_frame(g_session, g_frame, &g_serial);
-            if (got)
-                g_have_frame = 1;
-            LeaveCriticalSection(&g_fb_lock);
-            if (got)
-                InvalidateRect(g_hwnd, NULL, FALSE);
-        }
-    }
-    return NULL;
-}
-
-/* ---- display ---------------------------------------------------------------
- * MSXSESSION_FB_WIDTH x MSXSESSION_FB_HEIGHT is always exactly 4:3, but the
- * window itself need not be, so this still letterboxes. No aspect-mode or
- * smooth-scaling setting exists for this target (see this file's header
- * comment) -- always nearest-neighbour (COLORONCOLOR). */
-
-static RECT dest_rect(int cw, int ch)
-{
-    const double aspect =
-        (double)MSXSESSION_FB_WIDTH / (double)MSXSESSION_FB_HEIGHT;
-    double dw, dh;
-    RECT r;
-
-    if ((double)cw / ch > aspect) {
-        dh = ch;
-        dw = ch * aspect;
-    } else {
-        dw = cw;
-        dh = cw / aspect;
-    }
-    r.left = (LONG)((cw - dw) / 2);
-    r.top = (LONG)((ch - dh) / 2);
-    r.right = r.left + (LONG)dw;
-    r.bottom = r.top + (LONG)dh;
-    return r;
-}
-
-static void paint(HWND hwnd)
-{
-    PAINTSTRUCT ps;
-    HDC hdc = BeginPaint(hwnd, &ps);
-    RECT client;
-    BITMAPINFO bmi;
-    RECT d;
-
-    GetClientRect(hwnd, &client);
-    FillRect(hdc, &client, (HBRUSH)GetStockObject(BLACK_BRUSH));
-
-    EnterCriticalSection(&g_fb_lock);
-    if (g_have_frame) {
-        memset(&bmi, 0, sizeof(bmi));
-        bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
-        bmi.bmiHeader.biWidth = MSXSESSION_FB_WIDTH;
-        bmi.bmiHeader.biHeight = -MSXSESSION_FB_HEIGHT; /* top-down */
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB;
-
-        d = dest_rect(client.right, client.bottom);
-        SetStretchBltMode(hdc, COLORONCOLOR);
-        StretchDIBits(hdc, d.left, d.top, d.right - d.left, d.bottom - d.top,
-                      0, 0, MSXSESSION_FB_WIDTH, MSXSESSION_FB_HEIGHT,
-                      g_frame, &bmi, DIB_RGB_COLORS, SRCCOPY);
-    }
-    LeaveCriticalSection(&g_fb_lock);
-
-    EndPaint(hwnd, &ps);
+    RECT rc;
+    if (!g_display)
+        return;
+    GetClientRect(g_hwnd, &rc);
+    MoveWindow(g_display, 0, 0, rc.right, rc.bottom, TRUE);
 }
 
 /* ---- keyboard ----------------------------------------------------------------
@@ -356,20 +262,64 @@ static void show_fujinet_config(void)
 
 #define LOG_TIMER_ID 1
 
+/* The log starts at its end and follows it while the reader is there; once
+ * they scroll up it stays where they left it, and an unchanged log is not
+ * touched at all (SetWindowText would throw the view back to its top). */
+static int log_at_end(void)
+{
+    TEXTMETRICA tm;
+    RECT c;
+    HDC dc = GetDC(g_log_edit);
+    HGDIOBJ old = SelectObject(dc, GetStockObject(ANSI_FIXED_FONT));
+    int rows, first, count;
+
+    GetTextMetricsA(dc, &tm);
+    SelectObject(dc, old);
+    ReleaseDC(g_log_edit, dc);
+    GetClientRect(g_log_edit, &c);
+    rows = tm.tmHeight > 0 && c.bottom > tm.tmHeight ? c.bottom / tm.tmHeight : 1;
+    first = (int)SendMessageA(g_log_edit, EM_GETFIRSTVISIBLELINE, 0, 0);
+    count = (int)SendMessageA(g_log_edit, EM_GETLINECOUNT, 0, 0);
+    return first + rows >= count;
+}
+
+static char g_log_shown[128 * 1024];
+static int g_log_have_shown;
+
+static void refresh_log(void)
+{
+    static char buf[128 * 1024];
+    const char *text;
+    int n = msxsession_fujinet_copy_log(g_session, buf, sizeof(buf));
+    int follow, first;
+
+    text = n > 0 ? buf : "(no FujiNet output yet)";
+    if (g_log_have_shown && strcmp(text, g_log_shown) == 0)
+        return;
+    follow = !g_log_have_shown || log_at_end();
+    first = (int)SendMessageA(g_log_edit, EM_GETFIRSTVISIBLELINE, 0, 0);
+    SendMessageA(g_log_edit, WM_SETREDRAW, FALSE, 0);
+    SetWindowTextA(g_log_edit, text);
+    if (follow)
+        SendMessageA(g_log_edit, EM_LINESCROLL, 0,
+                     SendMessageA(g_log_edit, EM_GETLINECOUNT, 0, 0));
+    else
+        SendMessageA(g_log_edit, EM_LINESCROLL, 0, first);
+    SendMessageA(g_log_edit, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g_log_edit, NULL, TRUE);
+    snprintf(g_log_shown, sizeof(g_log_shown), "%s", text);
+    g_log_have_shown = 1;
+}
+
 static LRESULT CALLBACK log_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_SIZE:
         MoveWindow(g_log_edit, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
         return 0;
-    case WM_TIMER: {
-        static char buf[128 * 1024];
-        int n = msxsession_fujinet_copy_log(g_session, buf, sizeof(buf));
-        SetWindowTextA(g_log_edit, n > 0 ? buf : "(no FujiNet output yet)");
-        SendMessageA(g_log_edit, EM_SETSEL, (WPARAM)-1, (LPARAM)-1);
-        SendMessageA(g_log_edit, EM_SCROLLCARET, 0, 0);
+    case WM_TIMER:
+        refresh_log();
         return 0;
-    }
     case WM_CLOSE:
         KillTimer(hwnd, LOG_TIMER_ID);
         DestroyWindow(hwnd);
@@ -407,13 +357,15 @@ static void show_fujinet_log(HINSTANCE inst)
         0, 0, 0, 0, g_log_window, NULL, inst, NULL);
     SendMessageA(g_log_edit, WM_SETFONT, (WPARAM)GetStockObject(ANSI_FIXED_FONT),
                 TRUE);
+    g_log_have_shown = 0;
+    refresh_log();
     SetTimer(g_log_window, LOG_TIMER_ID, 1000, NULL);
     ShowWindow(g_log_window, SW_SHOW);
 }
 
 static void open_debugger(void)
 {
-    msx_debugger_show(g_hwnd, g_session);
+    msx_debugger_toggle(g_hwnd, g_session);
 }
 
 /* ---- fullscreen ---------------------------------------------------------------- */
@@ -507,17 +459,10 @@ static void rebuild_menu(HWND hwnd)
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
-    case WM_PAINT:
-        paint(hwnd);
-        return 0;
     case WM_ERASEBKGND:
-        return 1; /* paint() clears; avoid flicker */
+        return 1; /* the display child covers the client; no flash of black */
     case WM_SIZE:
-        /* A resize only invalidates the newly exposed strips, and BeginPaint
-         * clips the repaint to them -- the rest of the client area would keep
-         * the image blitted at the old size (visible as a ghost after
-         * maximize or F11). Ask for the whole client area instead. */
-        InvalidateRect(hwnd, NULL, FALSE);
+        layout_display();
         return 0;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
@@ -550,12 +495,17 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDM_FULLSCREEN: toggle_fullscreen(hwnd); break;
         case IDM_DEBUGGER:   open_debugger(); break;
         case IDM_ABOUT:
-            MessageBoxA(hwnd,
-                        "FujiNet Go MSX\n"
-                        "Self-contained MSX with built-in FujiNet.\n"
-                        "Copyright (C) 2026 Thomas Cherryhomes\n"
-                        "GPL-3.0-or-later",
-                        "About FujiNet Go MSX", MB_ICONINFORMATION);
+            {
+                char about[256];
+                snprintf(about, sizeof about,
+                         "FujiNet Go MSX\n"
+                         "Self-contained MSX with built-in FujiNet.\n"
+                         "Copyright (C) 2026 Thomas Cherryhomes\n"
+                         "GPL-3.0-or-later\n\nDisplay: %s",
+                         msx_display_renderer());
+                MessageBoxA(hwnd, about, "About FujiNet Go MSX",
+                            MB_ICONINFORMATION);
+            }
             break;
         case IDM_EXIT: DestroyWindow(hwnd); break;
         default: break;
@@ -578,7 +528,6 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     (void)cmd;
 
     SetProcessDPIAware();
-    InitializeCriticalSection(&g_fb_lock);
 
     g_session = msxsession_new(NULL);
     if (!g_session) {
@@ -611,10 +560,9 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
                              800, 640, NULL, g_menu, inst, NULL);
     if (!g_hwnd)
         return 1;
+    g_display = msx_display_create(g_hwnd, g_session);
+    layout_display();
     ShowWindow(g_hwnd, show);
-
-    g_present_run = 1;
-    pthread_create(&g_present_thread, NULL, present_main, NULL);
 
     /* Developer affordance: open the debugger alongside the main window,
      * which is what you want when the app dies before you can reach a
@@ -631,9 +579,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         DispatchMessageA(&msg);
     }
 
-    g_present_run = 0;
-    pthread_join(g_present_thread, NULL);
+    msx_display_destroy();
     msxsession_free(g_session);
-    DeleteCriticalSection(&g_fb_lock);
     return (int)msg.wParam;
 }

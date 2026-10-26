@@ -74,7 +74,7 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval,
             gtk_window_fullscreen(GTK_WINDOW(self));
         return TRUE;
     case GDK_KEY_F12:
-        msx_debugger_show(GTK_WINDOW(self), self->session);
+        msx_debugger_toggle(GTK_WINDOW(self), self->session);
         return TRUE;
     default:
         break;
@@ -199,33 +199,101 @@ static void action_fujinet_config(GSimpleAction *action, GVariant *param,
     g_object_unref(launcher);
 }
 
+/* The log window: starts at the bottom and follows it while the reader is
+ * there; once they scroll up it stays put, and an unchanged log is not
+ * touched. One window, refreshed once a second like the other frontends. */
+typedef struct {
+    MsxWindow *owner;
+    GtkWidget *window;
+    GtkWidget *view;
+    GtkAdjustment *adj;
+    char *shown;
+    gboolean follow;
+    guint timer;
+} LogWin;
+
+static LogWin *log_win;
+
+static gboolean log_at_end(GtkAdjustment *adj)
+{
+    return gtk_adjustment_get_value(adj) + gtk_adjustment_get_page_size(adj) >=
+           gtk_adjustment_get_upper(adj) - 2.0;
+}
+
+/* New text grows the view only once it is laid out: pin the end then. */
+static void log_adj_changed(GtkAdjustment *adj, gpointer data)
+{
+    LogWin *lw = data;
+    if (lw->follow)
+        gtk_adjustment_set_value(adj, gtk_adjustment_get_upper(adj) -
+                                      gtk_adjustment_get_page_size(adj));
+}
+
+static gboolean log_refresh(gpointer data)
+{
+    LogWin *lw = data;
+    char buf[128 * 1024];
+    const char *text;
+    int n = msxsession_fujinet_copy_log(lw->owner->session, buf, sizeof(buf));
+
+    text = n > 0 ? buf : "(no FujiNet output yet)";
+    if (lw->shown && strcmp(lw->shown, text) == 0)
+        return G_SOURCE_CONTINUE;
+    lw->follow = !lw->shown || log_at_end(lw->adj);
+    gtk_text_buffer_set_text(
+        gtk_text_view_get_buffer(GTK_TEXT_VIEW(lw->view)), text, -1);
+    g_free(lw->shown);
+    lw->shown = g_strdup(text);
+    return G_SOURCE_CONTINUE;
+}
+
+static void log_destroyed(GtkWidget *w, gpointer data)
+{
+    LogWin *lw = data;
+    (void)w;
+    if (lw->timer)
+        g_source_remove(lw->timer);
+    g_free(lw->shown);
+    g_free(lw);
+    log_win = NULL;
+}
+
 static void action_fujinet_log(GSimpleAction *action, GVariant *param,
                                gpointer user_data)
 {
     MsxWindow *self = MSX_WINDOW(user_data);
-    char buf[16384];
-    GtkWidget *dialog, *scroll, *view;
-    GtkTextBuffer *tbuf;
+    GtkWidget *scroll;
+    LogWin *lw;
     (void)action;
     (void)param;
 
-    msxsession_fujinet_copy_log(self->session, buf, sizeof(buf));
+    if (log_win) {
+        gtk_window_present(GTK_WINDOW(log_win->window));
+        return;
+    }
+    lw = g_new0(LogWin, 1);
+    log_win = lw;
+    lw->owner = self;
+    lw->window = gtk_window_new();
+    gtk_window_set_title(GTK_WINDOW(lw->window), "FujiNet Console Log");
+    gtk_window_set_default_size(GTK_WINDOW(lw->window), 700, 500);
+    gtk_window_set_transient_for(GTK_WINDOW(lw->window), GTK_WINDOW(self));
+    gtk_window_set_destroy_with_parent(GTK_WINDOW(lw->window), TRUE);
 
-    dialog = gtk_window_new();
-    gtk_window_set_title(GTK_WINDOW(dialog), "FujiNet Console Log");
-    gtk_window_set_default_size(GTK_WINDOW(dialog), 700, 500);
-    gtk_window_set_transient_for(GTK_WINDOW(dialog), GTK_WINDOW(self));
-
-    view = gtk_text_view_new();
-    gtk_text_view_set_editable(GTK_TEXT_VIEW(view), FALSE);
-    gtk_text_view_set_monospace(GTK_TEXT_VIEW(view), TRUE);
-    tbuf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
-    gtk_text_buffer_set_text(tbuf, buf, -1);
+    lw->view = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(lw->view), FALSE);
+    gtk_text_view_set_monospace(GTK_TEXT_VIEW(lw->view), TRUE);
 
     scroll = gtk_scrolled_window_new();
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), view);
-    gtk_window_set_child(GTK_WINDOW(dialog), scroll);
-    gtk_window_present(GTK_WINDOW(dialog));
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), lw->view);
+    gtk_window_set_child(GTK_WINDOW(lw->window), scroll);
+    lw->adj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scroll));
+    g_signal_connect(lw->adj, "changed", G_CALLBACK(log_adj_changed), lw);
+    g_signal_connect(lw->window, "destroy", G_CALLBACK(log_destroyed), lw);
+
+    log_refresh(lw);
+    lw->timer = g_timeout_add_seconds(1, log_refresh, lw);
+    gtk_window_present(GTK_WINDOW(lw->window));
 }
 
 static void action_debugger(GSimpleAction *action, GVariant *param,
@@ -234,7 +302,7 @@ static void action_debugger(GSimpleAction *action, GVariant *param,
     MsxWindow *self = MSX_WINDOW(user_data);
     (void)action;
     (void)param;
-    msx_debugger_show(GTK_WINDOW(self), self->session);
+    msx_debugger_toggle(GTK_WINDOW(self), self->session);
 }
 
 static void action_about(GSimpleAction *action, GVariant *param,

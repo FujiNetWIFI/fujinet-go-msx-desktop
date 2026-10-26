@@ -112,7 +112,7 @@ int main(void)
      * -- caught for real on a GitHub Actions Linux runner (this exact
      * assertion failed there while passing reliably on the maintainer's
      * own dev machine, byte-timing-dependent rather than environment-
-     * dependent as such). msxdebug_pause() makes the outcome deterministic
+     * dependent as such). msxdebug_stop() makes the outcome deterministic
      * instead of luck-of-the-timing. */
     {
         uint8_t poke_byte = 0x5A;
@@ -120,7 +120,7 @@ int main(void)
         msxvdp_snapshot snap;
         char hex[256];
 
-        msxdebug_pause(d);
+        msxdebug_stop(d);
 
         /* VDP debug commands are keyed by name, not a msxdebug API of
          * their own for VRAM writes yet (this pass's scope -- see

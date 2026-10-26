@@ -153,21 +153,37 @@ static NSInteger machineIndex(const char *machineId)
     [_logWindow makeKeyAndOrderFront:nil];
 }
 
+/* Starts at the bottom and follows it while the reader is there; once they
+ * scroll up it stays put, and an unchanged log is not touched. */
 - (void)refreshLog
 {
     static char buf[128 * 1024];
     int n = msxsession_fujinet_copy_log(_session, buf, sizeof(buf));
     NSString *text = n > 0 ? [NSString stringWithUTF8String:buf]
                            : @"(no FujiNet output yet)";
-    if (text)
-        _logView.string = text;
-    [_logView scrollToEndOfDocument:nil];
+    NSScrollView *scroll = _logView.enclosingScrollView;
+    const BOOL first = _logView.string.length == 0;
+    BOOL follow = first;
+
+    if (!text || (!first && [_logView.string isEqualToString:text]))
+        return;
+    if (!first && scroll)
+        follow = NSMaxY(scroll.contentView.documentVisibleRect) >=
+                 NSHeight(_logView.frame) - 4;
+    const NSPoint at = scroll ? scroll.contentView.bounds.origin : NSZeroPoint;
+    _logView.string = text;
+    if (follow) {
+        [_logView scrollRangeToVisible:NSMakeRange(text.length, 0)];
+    } else if (scroll) {
+        [scroll.contentView scrollToPoint:at];
+        [scroll reflectScrolledClipView:scroll.contentView];
+    }
 }
 
 - (void)showDebugger:(id)sender
 {
     (void)sender;
-    [DebuggerWindow showForSession:_session];
+    [DebuggerWindow toggleForSession:_session];
 }
 
 /* ---- menus -------------------------------------------------------------------- */

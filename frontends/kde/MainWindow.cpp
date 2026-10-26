@@ -60,7 +60,8 @@ void MainWindow::status(const QString &message)
 
 void MainWindow::showDebugger()
 {
-    DebuggerWindow::showFor(this, m_session);
+    /* F12 / View > Debugger: shows it, or hides it when it is up. */
+    DebuggerWindow::toggleFor(this, m_session);
 }
 
 void MainWindow::importMedia()

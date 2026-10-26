@@ -45,6 +45,24 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.3.0" date="2026-10-26">
+      <description>
+        <p>
+          Debugger: redesigned like the other FujiNet Go desktops. Opening it
+          stops the machine and closing it lets the machine run; F12 toggles
+          it. A Console tab runs short commands or any openMSX Tcl command,
+          with history and Tab completion. Execute, memory and I/O port
+          breakpoints take Tcl conditions and count hits. New Breakpoints and
+          Slots and I/O tabs; Follow PC, Run to Cursor, and Frame (run to the
+          next VDP interrupt).
+        </p>
+        <p>
+          The console log starts at the bottom and stays where you scrolled.
+          On Windows the picture is drawn with Direct3D 11, and the console
+          log now shows the FujiNet output.
+        </p>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-19">
       <description>
         <p>

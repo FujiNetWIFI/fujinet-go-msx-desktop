@@ -227,6 +227,8 @@ int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
 
     s->running = 1;
     pthread_mutex_unlock(&s->lifecycle_mtx);
+    /* a debugger attached before the machine came up stops it now */
+    if (s->debugger) msxdebug_machine_changed(s->debugger, 1);
     return 0;
 }
 
@@ -243,6 +245,7 @@ void msxsession_stop(msxsession *s)
     fujinet_stop(s);
     s->running = 0;
     pthread_mutex_unlock(&s->lifecycle_mtx);
+    if (s->debugger) msxdebug_machine_changed(s->debugger, 1);
 }
 
 void msxsession_set_machine(msxsession *s, const char *machine_id)
@@ -250,8 +253,11 @@ void msxsession_set_machine(msxsession *s, const char *machine_id)
     if (!s || !machine_id || !*machine_id) return;
     snprintf(s->cur_machine, sizeof(s->cur_machine), "%s", machine_id);
     msxsession_set_str(s, "machine", machine_id);
-    if (s->running)
+    if (s->running) {
         msxhost_switch_machine(machine_id);
+        /* the new machine has none of the old one's breakpoints */
+        if (s->debugger) msxdebug_machine_changed(s->debugger, 1);
+    }
 }
 
 const char *msxsession_machine(const msxsession *s)
@@ -295,7 +301,10 @@ void msxsession_joystick_button(msxsession *s, int port, int button,
 
 void msxsession_reset(msxsession *s)
 {
-    if (s->running) msxhost_core_reset();
+    if (s->running) {
+        msxhost_core_reset();
+        if (s->debugger) msxdebug_machine_changed(s->debugger, 0);
+    }
 }
 
 const char *msxsession_config_path(const msxsession *s) { return s->config_dir; }

@@ -34,7 +34,7 @@ downloads and `TODO` for the full history.
 | GNOME | GTK4 + libadwaita (+ WebKitGTK) | `fujinet-go-msx-gnome` | done, tested on real hardware |
 | KDE | Qt6 Widgets (+ QtWebEngine) | `fujinet-go-msx-kde` | done, tested on real hardware |
 | macOS | AppKit (+ WKWebView) | `FujiNet Go MSX.app` | done, verified on CI |
-| Windows | Win32 (GDI + DwmFlush) | `fujinet-go-msx-windows.exe` | done, verified on CI |
+| Windows | Win32 (Direct3D 11, GDI fallback) | `fujinet-go-msx-windows.exe` | done, verified on CI |
 
 The maintainer develops on Linux without Mac or Windows hardware: those two
 builds are compiled, tested and packaged on CI's macOS and Windows runners,
@@ -58,14 +58,27 @@ platforms are very welcome.
 
 ### Developer debugger (F12)
 
-Breakpoints, pause/step into/over/out, run-to, a Z80 disassembler, memory and
-register views, and a decoded VDP pane that understands the TMS9918A (MSX1),
-V9938 (MSX2) and V9958 (MSX2+) — modes, table addressing, the palette RAM,
-sprite mode 2, and the V9938/V9958 command engine (VRAM-to-VRAM blit unit).
-A FujiNet tab shows every FujiBus packet between the MSX and FujiNet, both
-ways, with hex, recorded from the first boot whether or not the debugger is
-open. Available in every frontend over the one shared engine; it extends
-`fujinet-go-adam-desktop`'s TMS9918A visualizer to the V9938/V9958.
+F12 toggles it. Opening it stops the machine and closing it lets the machine
+run, as on every FujiNet Go desktop. Tabs: a Console (short commands, or any
+of openMSX's own Tcl commands, with history and Tab completion), CPU &
+Memory (editable registers and flags, hex dump), Disassembly (Follow PC,
+breakpoint gutter, labels from the BIOS table or a symbol file), a decoded
+VDP pane that understands the TMS9918A (MSX1), V9938 (MSX2) and V9958
+(MSX2+) — modes, table addressing, the palette RAM, sprite mode 2, and the
+V9938/V9958 command engine — Breakpoints (execute, memory read/write and I/O
+port watchpoints, with Tcl conditions, hit counts and enable/disable),
+Slots & I/O (slot selection and map, PSG, memory mapper) and a FujiNet tab
+showing every FujiBus packet between the MSX and FujiNet, both ways, with
+hex, recorded from the first boot whether or not the debugger is open. Step
+(F7), Step Over (F8), Step Out (Shift+F8), Run to Cursor, and Frame
+(Shift+F7: run to the next VDP interrupt). `MSX_OPEN_DEBUGGER=1` opens it at
+startup and `MSX_DEBUGGER_TAB` picks the tab (a number or the start of its
+name). Available in every frontend over the one shared engine, which drives
+openMSX's own debug interface.
+
+On Windows the picture is drawn with Direct3D 11 on its own render thread
+(`MSX_RENDERER=gdi` forces the GDI fallback; `MSX_FPS=1` prints the frame
+rates).
 
 ## Building
 

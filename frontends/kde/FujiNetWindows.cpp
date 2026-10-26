@@ -74,13 +74,22 @@ void fujinet_log_show(QWidget *parent, msxsession *session)
     layout->addWidget(view);
 
     auto *timer = new QTimer(win);
+    /* Starts at the bottom and follows it while the reader is there; once
+     * they scroll up it stays put, and an unchanged log is not touched. */
     auto refresh = [view, session]() {
         static char buf[128 * 1024];
         const int n = msxsession_fujinet_copy_log(session, buf, sizeof(buf));
-        view->setPlainText(n > 0 ? QString::fromUtf8(buf)
-                                 : QStringLiteral("(no FujiNet output yet)"));
-        view->verticalScrollBar()->setValue(
-            view->verticalScrollBar()->maximum());
+        const QString text = n > 0 ? QString::fromUtf8(buf)
+                                   : QStringLiteral("(no FujiNet output yet)");
+        QScrollBar *vs = view->verticalScrollBar();
+        const bool first = view->document()->isEmpty();
+        if (!first && view->toPlainText() == text)
+            return;
+        const bool follow = first || vs->value() >= vs->maximum() - 1;
+        const int top = vs->value(), left = view->horizontalScrollBar()->value();
+        view->setPlainText(text);
+        vs->setValue(follow ? vs->maximum() : top);
+        view->horizontalScrollBar()->setValue(left);
     };
     QObject::connect(timer, &QTimer::timeout, view, refresh);
     timer->start(1000);

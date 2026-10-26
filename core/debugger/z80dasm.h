@@ -9,15 +9,23 @@
 
 #include <stdint.h>
 
-/* One decoded instruction; text/flags conventions match msxdasm_line in
- * msxdebug.h (which embeds this data). */
+/* Instruction flags (z80d_insn.flags). */
+#define MSXDASM_JUMP     0x01
+#define MSXDASM_CALL     0x02
+#define MSXDASM_RET      0x04
+#define MSXDASM_COND     0x08
+#define MSXDASM_RELATIVE 0x10
+#define MSXDASM_BLOCK    0x20 /* LDIR/CPIR/INIR/OTIR family */
+#define MSXDASM_HALT     0x40
+
+/* One decoded instruction. */
 typedef struct {
     uint16_t addr;
     uint8_t len; /* 1..4 */
     uint8_t bytes[4];
     char text[32];
     uint16_t target;
-    uint8_t flags; /* ADAMDASM_* */
+    uint8_t flags; /* MSXDASM_* */
 } z80d_insn;
 
 /* Decodes the instruction at addr from code[0..3]; returns its length. */

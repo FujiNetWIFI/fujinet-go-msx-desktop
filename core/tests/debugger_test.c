@@ -1,15 +1,16 @@
 /*
  * debugger_test -- exercises the msxdebug engine (core/debugger/debugger.c)
- * against a real, running C-BIOS boot: pause/resume, step_into actually
- * advancing PC, a persistent breakpoint firing autonomously (delivered via
- * the engine's own poll thread -- see debugger.c's header comment) while
- * free-running, disassembly of live memory, and register read/write.
+ * against a real, running C-BIOS boot: attach stopping the machine and
+ * detach letting it go, step into/over/out and frame, an execute breakpoint
+ * and a memory watchpoint firing on their own (found by the engine's poll
+ * thread) with hit counts and a stop reason, conditions, disassembly of live
+ * memory with the PC marked, register read/write, the console, and the slot
+ * state.
  *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,30 +19,15 @@
 #include "msxsession.h"
 #include "test_sleep.h"
 
-static pthread_mutex_t stop_mtx = PTHREAD_MUTEX_INITIALIZER;
-static int stop_count;
-static msxdebug_stop_reason last_reason;
-static uint16_t last_pc;
+static int rc;
 
-static void on_stop(void *ud, msxdebug_stop_reason reason, uint16_t pc)
-{
-    (void)ud;
-    pthread_mutex_lock(&stop_mtx);
-    stop_count++;
-    last_reason = reason;
-    last_pc = pc;
-    pthread_mutex_unlock(&stop_mtx);
-}
+#define CHECK(cond, ...) do { if (!(cond)) { fprintf(stderr, "debugger_test: " __VA_ARGS__); fputc('\n', stderr); rc = 1; } } while (0)
 
-static int wait_for_stop_count(int want, int timeout_ms)
+static int wait_stopped(msxdebug *d, int timeout_ms)
 {
     int waited;
     for (waited = 0; waited < timeout_ms; waited += 20) {
-        int n;
-        pthread_mutex_lock(&stop_mtx);
-        n = stop_count;
-        pthread_mutex_unlock(&stop_mtx);
-        if (n >= want) return 1;
+        if (msxdebug_is_stopped(d)) return 1;
         sleep_ms(20);
     }
     return 0;
@@ -54,7 +40,6 @@ int main(void)
     msxdebug *d;
     uint32_t *fb;
     uint64_t serial = 0;
-    int rc = 0;
     int waited_ms;
 
     s = msxsession_new(NULL);
@@ -65,8 +50,7 @@ int main(void)
     msxsession_default_opts(s, &opts);
     opts.enable_fujinet = 0;
     if (msxsession_start(s, &opts) != 0) {
-        fprintf(stderr, "debugger_test: start failed: %s\n",
-                msxsession_last_error(s));
+        fprintf(stderr, "debugger_test: start failed: %s\n", msxsession_last_error(s));
         msxsession_free(s);
         return 1;
     }
@@ -88,133 +72,198 @@ int main(void)
         rc = 1;
         goto done;
     }
-    msxdebug_set_stop_callback(d, on_stop, NULL);
 
-    /* 1. pause() actually halts the CPU and delivers PAUSE synchronously. */
-    msxdebug_pause(d);
-    if (!msxdebug_is_paused(d)) {
-        fprintf(stderr, "debugger_test: not paused after msxdebug_pause\n");
-        rc = 1;
-    }
-    if (!wait_for_stop_count(1, 500) || last_reason != MSXDBG_STOP_PAUSE) {
-        fprintf(stderr, "debugger_test: pause callback not delivered as "
-                        "MSXDBG_STOP_PAUSE (count=%d reason=%d)\n",
-                stop_count, (int)last_reason);
-        rc = 1;
-    } else {
-        printf("debugger_test: pause confirmed, PC=0x%04X\n", last_pc);
-    }
-
-    /* 2. step_into() actually advances PC by a real instruction. */
+    /* 1. attach stops the machine; detach lets it go. */
     {
-        msxdebug_z80_regs before, after;
-        uint16_t pc_before, pc_after;
-        msxdebug_get_regs(d, &before);
-        pc_before = (uint16_t)((before.pch << 8) | before.pcl);
-        msxdebug_step_into(d);
-        msxdebug_get_regs(d, &after);
-        pc_after = (uint16_t)((after.pch << 8) | after.pcl);
-        if (pc_after == pc_before) {
-            fprintf(stderr, "debugger_test: step_into did not change PC "
-                            "(stayed at 0x%04X)\n", pc_before);
-            rc = 1;
-        } else {
-            printf("debugger_test: step_into PC 0x%04X -> 0x%04X\n",
-                  pc_before, pc_after);
-        }
+        unsigned g0 = msxdebug_generation(d);
+        char why[128];
+        int addr = 0;
+        CHECK(!msxdebug_is_attached(d) && !msxdebug_is_stopped(d), "starts attached or stopped");
+        msxdebug_attach(d);
+        CHECK(msxdebug_is_attached(d) && msxdebug_is_stopped(d), "not stopped after attach");
+        CHECK(msxdebug_generation(d) != g0, "attach did not bump the generation");
+        msxdebug_stop_reason(d, why, sizeof(why), &addr);
+        CHECK(addr >= 0, "no stop address after attach");
+        printf("debugger_test: attach stopped at $%04X (%s)\n", addr, why);
     }
 
-    /* 3. disassembly of live memory at PC produces a plausible instruction
-     * (length 1-4, non-empty text) rather than garbage. */
+    /* 2. step into advances PC; the CPU view and the disassembly agree. */
     {
-        msxdebug_z80_regs r;
-        msxdasm_line lines[4];
-        int n;
-        uint16_t pc;
-        msxdebug_get_regs(d, &r);
-        pc = (uint16_t)((r.pch << 8) | r.pcl);
-        n = msxdebug_disassemble(d, pc, 4, lines);
-        if (n != 4) {
-            fprintf(stderr, "debugger_test: disassemble returned %d, want 4\n", n);
-            rc = 1;
-        } else if (lines[0].len < 1 || lines[0].len > 4 || lines[0].text[0] == '\0') {
-            fprintf(stderr, "debugger_test: implausible first line: len=%d "
-                            "text=\"%s\"\n", lines[0].len, lines[0].text);
-            rc = 1;
-        } else {
-            printf("debugger_test: disasm @0x%04X: %s (len %d)\n",
-                  lines[0].addr, lines[0].text, lines[0].len);
-        }
+        msxdebug_cpu a, b;
+        msxdebug_line lines[8];
+        int pcl = -2;
+        msxdebug_cpu_get(d, &a);
+        msxdebug_step(d);
+        msxdebug_cpu_get(d, &b);
+        CHECK(a.pc != b.pc, "step did not change PC (stayed at $%04X)", a.pc);
+        printf("debugger_test: step PC $%04X -> $%04X\n", a.pc, b.pc);
+        msxdebug_disassemble(d, (uint16_t)b.pc, lines, 8, &pcl);
+        CHECK(pcl == 0, "the PC row is %d, want 0", pcl);
+        CHECK(lines[0].is_pc && lines[0].length >= 1 && lines[0].disasm[0], "implausible first line");
+        printf("debugger_test: disasm @$%04X: %s\n", lines[0].address, lines[0].disasm);
+        CHECK(msxdebug_row_address(d, lines[3].address, -3) == lines[0].address,
+              "row_address back 3 from row 3 is not row 0");
+        CHECK(msxdebug_row_address(d, lines[0].address, 3) == lines[3].address,
+              "row_address forward 3 is not row 3");
     }
 
-    /* 4. A persistent breakpoint a few instructions ahead fires
-     * autonomously while free-running, delivered via the poll thread (not
-     * a call we're blocking on) -- the real point of this whole engine. */
+    /* 3. registers: write through, flags, read back. */
     {
-        msxdebug_z80_regs r;
-        msxdasm_line lines[6];
-        uint16_t pc, bp_addr;
-        int n, i;
-        int prev_count;
+        msxdebug_cpu c;
+        msxdebug_cpu_set(d, MSX_REG_BC, 0x1234);
+        msxdebug_cpu_set(d, MSX_FLAG_C, 1);
+        msxdebug_cpu_get(d, &c);
+        CHECK(c.bc == 0x1234, "BC reads $%04X, want $1234", c.bc);
+        CHECK(c.cf == 1, "carry did not stick");
+        msxdebug_cpu_set(d, MSX_FLAG_C, 0);
+        msxdebug_cpu_get(d, &c);
+        CHECK(c.cf == 0, "carry did not clear");
+    }
 
-        msxdebug_get_regs(d, &r);
-        pc = (uint16_t)((r.pch << 8) | r.pcl);
-        n = msxdebug_disassemble(d, pc, 6, lines);
-        bp_addr = pc;
-        for (i = 0; i < n; i++) bp_addr = (uint16_t)(lines[i].addr + lines[i].len);
+    /* 4. an execute breakpoint a few instructions ahead fires on its own,
+     * found by the poll thread, with its hit counted and the reason named. */
+    {
+        msxdebug_line lines[6];
+        msxdebug_breakpoint list[8];
+        char why[128];
+        int addr = 0, id, n, i;
+        uint16_t bp_addr;
 
-        msxdebug_bp_set(d, bp_addr);
-        if (!msxdebug_bp_is_set(d, bp_addr)) {
-            fprintf(stderr, "debugger_test: bp_set did not register "
-                            "0x%04X as set\n", bp_addr);
-            rc = 1;
+        msxdebug_disassemble(d, (uint16_t)0, lines, 1, NULL);   /* touch */
+        {
+            msxdebug_cpu c;
+            msxdebug_cpu_get(d, &c);
+            msxdebug_disassemble(d, (uint16_t)c.pc, lines, 6, NULL);
         }
-
-        pthread_mutex_lock(&stop_mtx);
-        prev_count = stop_count;
-        pthread_mutex_unlock(&stop_mtx);
+        bp_addr = (uint16_t)(lines[5].address);
+        CHECK(msxdebug_breakpoint_toggle(d, bp_addr) == 1, "toggle did not set a breakpoint");
+        CHECK(msxdebug_breakpoint_check(d, bp_addr), "breakpoint_check says no");
+        msxdebug_disassemble(d, bp_addr, lines, 1, NULL);
+        CHECK(lines[0].has_breakpoint && lines[0].breakpoint_enabled, "the row does not show its breakpoint");
 
         msxdebug_resume(d);
-        if (!wait_for_stop_count(prev_count + 1, 3000)) {
-            fprintf(stderr, "debugger_test: breakpoint at 0x%04X never "
-                            "fired within 3s\n", bp_addr);
-            rc = 1;
-        } else if (last_reason != MSXDBG_STOP_BREAKPOINT) {
-            fprintf(stderr, "debugger_test: autonomous stop reported reason "
-                            "%d, want MSXDBG_STOP_BREAKPOINT\n",
-                    (int)last_reason);
-            rc = 1;
-        } else if (last_pc != bp_addr) {
-            fprintf(stderr, "debugger_test: breakpoint fired but PC is "
-                            "0x%04X, want 0x%04X\n", last_pc, bp_addr);
-            rc = 1;
-        } else {
-            printf("debugger_test: breakpoint at 0x%04X fired autonomously, "
-                  "delivered via the poll thread\n", bp_addr);
-        }
-        msxdebug_bp_clear(d, bp_addr);
-        if (msxdebug_bp_is_set(d, bp_addr)) {
-            fprintf(stderr, "debugger_test: bp_clear did not remove 0x%04X\n",
-                    bp_addr);
-            rc = 1;
-        }
+        CHECK(wait_stopped(d, 4000), "breakpoint at $%04X never fired", bp_addr);
+        msxdebug_stop_reason(d, why, sizeof(why), &addr);
+        CHECK(addr == bp_addr, "stopped at $%04X, want $%04X", addr, bp_addr);
+        CHECK(strstr(why, "breakpoint") != NULL, "reason \"%s\" does not name the breakpoint", why);
+        n = msxdebug_breakpoint_list(d, list, 8);
+        id = -1;
+        for (i = 0; i < n; i++) if (list[i].start == bp_addr) id = i;
+        CHECK(id >= 0 && list[id].hits == 1, "hits = %u, want 1", id >= 0 ? list[id].hits : 0);
+        printf("debugger_test: breakpoint fired: %s (hits %u)\n", why, id >= 0 ? list[id].hits : 0);
+
+        /* disabled: it must not fire */
+        msxdebug_breakpoint_enable(d, list[id].id, 0);
+        msxdebug_breakpoint_list(d, list, 8);
+        CHECK(!list[id].enabled, "disable did not take");
+        msxdebug_breakpoint_remove(d, list[id].id);
+        CHECK(!msxdebug_breakpoint_check(d, bp_addr), "remove did not remove");
     }
 
-    /* 5. resume() and confirm frames flow again. */
-    msxdebug_resume(d);
+    /* 5. the frame stops at the VDP interrupt vector; step over and step
+     * out are tried on a small program in RAM (interrupts off): DI,
+     * CALL $C008, NOP, ... $C008: RET. */
+    {
+        static const uint8_t prog[] = { 0xF3, 0xCD, 0x08, 0xC0, 0x00, 0x00, 0x00, 0x00, 0xC9 };
+        msxdebug_cpu c;
+        char why[128];
+        size_t k;
+
+        for (k = 0; k < sizeof(prog); k++) msxdebug_write(d, (uint16_t)(0xC000 + k), prog[k]);
+        msxdebug_cpu_set(d, MSX_REG_SP, 0xF000);
+        msxdebug_cpu_set(d, MSX_REG_PC, 0xC000);
+        msxdebug_step(d);                       /* DI */
+        msxdebug_step_over(d);                  /* CALL: over it */
+        CHECK(wait_stopped(d, 4000), "step over never stopped");
+        msxdebug_cpu_get(d, &c);
+        CHECK(c.pc == 0xC004, "step over stopped at $%04X, want $C004", c.pc);
+
+        msxdebug_cpu_set(d, MSX_REG_PC, 0xC001);
+        msxdebug_cpu_set(d, MSX_REG_SP, 0xF000);
+        msxdebug_step(d);                       /* CALL: into it */
+        msxdebug_cpu_get(d, &c);
+        CHECK(c.pc == 0xC008, "step into the call reached $%04X, want $C008", c.pc);
+        msxdebug_step_out(d);
+        CHECK(wait_stopped(d, 4000), "step out never stopped");
+        msxdebug_cpu_get(d, &c);
+        CHECK(c.pc == 0xC004, "step out stopped at $%04X, want $C004", c.pc);
+        printf("debugger_test: step over and step out reached $%04X\n", c.pc);
+
+        msxdebug_frame(d);
+        CHECK(wait_stopped(d, 4000), "frame never stopped");
+        msxdebug_cpu_get(d, &c);
+        msxdebug_stop_reason(d, why, sizeof(why), NULL);
+        CHECK(c.pc == 0x0038, "frame stopped at $%04X, want the interrupt vector $0038", c.pc);
+        CHECK(strcmp(why, "frame") == 0, "frame reason \"%s\"", why);
+        printf("debugger_test: frame stopped at $%04X (%s)\n", c.pc, why);
+    }
+
+    /* 6. a conditional memory watchpoint: C-BIOS writes the system RAM
+     * (JIFFY, the interrupt's tick counter, at $FC9E) every frame. */
+    {
+        msxdebug_breakpoint list[8];
+        char err[160], why[128];
+        int id, id2, n, i;
+        id = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9F, "", err, sizeof(err));
+        CHECK(id >= 0, "watchpoint add failed: %s", err);
+        id2 = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9E, "{bad", err, sizeof(err));
+        CHECK(id2 < 0 && err[0], "a brace in a condition was accepted");
+        id2 = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9E, "[[", err, sizeof(err));
+        CHECK(id2 < 0 && err[0], "a bad condition was accepted");
+        printf("debugger_test: a bad condition is refused: %s\n", err);
+        msxdebug_resume(d);
+        CHECK(wait_stopped(d, 4000), "write watchpoint never fired");
+        msxdebug_stop_reason(d, why, sizeof(why), NULL);
+        CHECK(strstr(why, "watchpoint") != NULL, "reason \"%s\" does not name the watchpoint", why);
+        n = msxdebug_breakpoint_list(d, list, 8);
+        for (i = 0; i < n; i++)
+            if (list[i].id == id) CHECK(list[i].hits >= 1, "watchpoint has no hits");
+        printf("debugger_test: %s\n", why);
+        msxdebug_breakpoint_clear(d);
+        CHECK(msxdebug_breakpoint_list(d, list, 8) == 0, "clear left breakpoints");
+    }
+
+    /* 7. the console: an alias, a label, and a Tcl pass-through. */
+    {
+        char out[4096];
+        msxdebug_command(d, "regs", out, sizeof(out));
+        CHECK(strstr(out, "PC=") != NULL, "regs printed %s", out);
+        msxdebug_command(d, "reg A", out, sizeof(out));
+        CHECK(out[0] != '\0', "a Tcl command printed nothing");
+        msxdebug_command(d, "break 0x4000 [reg A] == 1", out, sizeof(out));
+        CHECK(strstr(out, "set") != NULL, "break printed %s", out);
+        msxdebug_command(d, "breaks", out, sizeof(out));
+        CHECK(strstr(out, "$4000") != NULL && strstr(out, "if [reg A] == 1") != NULL, "breaks printed %s", out);
+        msxdebug_command(d, "clear", out, sizeof(out));
+        msxdebug_command(d, "label $4000 MYLABEL", out, sizeof(out));
+        CHECK(msxdebug_label_address(d, "MYLABEL") == 0x4000, "label not found");
+        msxdebug_command(d, "nosuchcommand", out, sizeof(out));
+        CHECK(strstr(out, "error") != NULL, "a bad command did not report an error: %s", out);
+        CHECK(msxdebug_completions(d, "ste", out, sizeof(out)) >= 1 && strstr(out, "step") != NULL,
+              "no completion for ste");
+    }
+
+    /* 8. the slot state names the machine and the slot map. */
+    {
+        static char text[8192];
+        msxdebug_io_state(d, text, sizeof(text));
+        CHECK(strstr(text, "Selected slots") != NULL && strstr(text, "PSG") != NULL, "io state: %s", text);
+    }
+
+    /* 9. detach lets the machine run again, and the engine keeps nothing armed. */
     {
         uint64_t after = serial;
         int resumed = 0;
+        msxdebug_breakpoint_toggle(d, 0x0000);      /* kept across the detach */
+        msxdebug_detach(d);
+        CHECK(!msxdebug_is_attached(d) && !msxdebug_is_stopped(d), "still attached/stopped after detach");
         for (waited_ms = 0; waited_ms < 5000; waited_ms += 50) {
             if (msxsession_copy_frame(s, fb, &after)) { resumed = 1; break; }
             sleep_ms(50);
         }
-        if (!resumed) {
-            fprintf(stderr, "debugger_test: no frames after resume\n");
-            rc = 1;
-        } else {
-            printf("debugger_test: frames resumed\n");
-        }
+        CHECK(resumed, "no frames after detach");
+        CHECK(msxdebug_breakpoint_check(d, 0x0000), "detach forgot the breakpoint");
+        printf("debugger_test: detach resumed the machine\n");
     }
 
 done:
