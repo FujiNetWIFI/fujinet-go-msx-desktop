@@ -160,7 +160,7 @@ jobs:
         id: bundle
         run: |
           app_id=$(sed -n 's/^app-id: *//p' "${{ matrix.manifest }}")
-          flatpak build-bundle repo "${app_id}.flatpak" "${app_id}" master
+          flatpak build-bundle --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo repo "${app_id}.flatpak" "${app_id}" master
           echo "app_id=${app_id}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@v4
