@@ -26,7 +26,8 @@ command: fujinet-go-msx-kde
 # Skips flatpak-builder's own debuginfo-extraction pass over every built
 # module. Smaller, simpler build; this app has no need to ship separate
 # debug symbols in the flatpak bundle.
-no-debuginfo: true
+build-options:
+  no-debuginfo: true
 
 # No embedded web view here, deliberately. QtWebEngine is the KDE
 # counterpart of the GNOME runtime's WebKitGTK, but org.kde.Sdk does not

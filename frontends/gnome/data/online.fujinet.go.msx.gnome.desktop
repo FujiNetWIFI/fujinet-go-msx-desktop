@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=FujiNet Go MSX
+Name=FujiNet Go MSX (GNOME)
 GenericName=MSX with FujiNet
 Comment=Self-contained MSX / MSX2 / MSX2+ with built-in FujiNet
 Exec=fujinet-go-msx-gnome

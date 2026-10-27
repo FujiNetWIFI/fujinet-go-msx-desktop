@@ -27,7 +27,7 @@
 
 app-id: online.fujinet.go.msx.gnome
 runtime: org.gnome.Platform
-runtime-version: '49'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 command: fujinet-go-msx-gnome
 
@@ -35,7 +35,8 @@ command: fujinet-go-msx-gnome
 # module (eu-strip pulling .debug info into a separate /lib/debug tree).
 # Smaller, simpler build; this app has no need to ship separate debug
 # symbols in the flatpak bundle.
-no-debuginfo: true
+build-options:
+  no-debuginfo: true
 
 finish-args:
   - --share=ipc

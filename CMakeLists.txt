@@ -14,7 +14,7 @@ endif()
 # and the release workflow all take it from PROJECT_VERSION, and cutting a
 # tag checks that the tag agrees with it (see "Cutting a release" in the
 # README).
-project(fujinet-go-msx-desktop VERSION 0.3.0 LANGUAGES C CXX)
+project(fujinet-go-msx-desktop VERSION 0.3.1 LANGUAGES C CXX)
 
 add_compile_definitions(MSX_VERSION_STRING="${PROJECT_VERSION}")
 
