@@ -591,7 +591,13 @@ static void refresh_fujinet(DbgWin *w, gboolean force)
     GString *t;
     int n = msxdebug_fujinet_trace(w->dbg, p, TRACE_MAX), i;
 
-    if (!msxsession_fujinet_running(w->session))
+    if (msxsession_fujinet_external(w->session)) {
+        g_autofree char *ext = g_strdup_printf(
+            "External FujiNet %s, cartridge %s.",
+            msxsession_fujinet_endpoint(w->session),
+            msxsession_fujinet_link(w->session) ? "connected" : "not connected");
+        gtk_label_set_text(w->fuji_note, ext);
+    } else if (!msxsession_fujinet_running(w->session))
         gtk_label_set_text(w->fuji_note,
                            "FujiNet is off (disabled, or its runtime did not start).");
     else

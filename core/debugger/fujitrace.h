@@ -38,7 +38,7 @@ int  fujitrace_packets(fujitrace *t, msx_fuji_packet *out, int max);
 void fujitrace_clear(fujitrace *t);
 
 /* The right pane: link and counts as text lines. */
-int  fujitrace_format_state(fujitrace *t, int running, int link, int port,
-                            char *dst, int dstsz);
+int  fujitrace_format_state(fujitrace *t, int running, int external, int link,
+                            const char *where, char *dst, int dstsz);
 
 #endif /* MSXDEBUG_FUJITRACE_H */

@@ -24,6 +24,7 @@
 
 #include "DisplayWidget.h"
 #include "FujiNetWindows.h"
+#include "SettingsDialog.h"
 #include "debugger/DebuggerWindow.h"
 
 #ifndef MSX_VERSION_STRING
@@ -62,6 +63,43 @@ void MainWindow::showDebugger()
 {
     /* F12 / View > Debugger: shows it, or hides it when it is up. */
     DebuggerWindow::toggleFor(this, m_session);
+}
+
+void MainWindow::restartSession()
+{
+    msxsession_start_opts opts;
+    msxsession_stop(m_session);
+    msxsession_default_opts(m_session, &opts);
+    if (msxsession_start(m_session, &opts) != 0)
+        status(QString::fromUtf8(msxsession_last_error(m_session)));
+}
+
+void MainWindow::showPreferences()
+{
+    SettingsDialog dialog(m_session, this);
+    if (dialog.exec() == QDialog::Accepted && dialog.sessionDirty()) {
+        restartSession();
+        status(QStringLiteral("FujiNet options applied (session restarted)"));
+    }
+    m_display->setFocus();
+}
+
+void MainWindow::showFujiNetConfig()
+{
+    if (msxsession_fujinet_external(m_session)) {
+        status(QStringLiteral("FujiNet is external: use its own web UI"));
+        return;
+    }
+    fujinet_config_show(this, m_session);
+}
+
+void MainWindow::showFujiNetLog()
+{
+    if (msxsession_fujinet_external(m_session)) {
+        status(QStringLiteral("FujiNet is external: see its own console"));
+        return;
+    }
+    fujinet_log_show(this, m_session);
 }
 
 void MainWindow::importMedia()
@@ -117,10 +155,12 @@ void MainWindow::buildMenus()
                      this, &MainWindow::importMedia);
 
     QMenu *fujinet = menuBar()->addMenu(QStringLiteral("&FujiNet"));
+    fujinet->addAction(QStringLiteral("&Preferences…"), this,
+                       &MainWindow::showPreferences);
     fujinet->addAction(QStringLiteral("&Configuration…"), this,
-                       [this] { fujinet_config_show(this, m_session); });
+                       &MainWindow::showFujiNetConfig);
     fujinet->addAction(QStringLiteral("Console &Log…"), this,
-                       [this] { fujinet_log_show(this, m_session); });
+                       &MainWindow::showFujiNetLog);
 
     QMenu *view = menuBar()->addMenu(QStringLiteral("&View"));
     view->addAction(QStringLiteral("&Debugger"), QKeySequence(Qt::Key_F12),

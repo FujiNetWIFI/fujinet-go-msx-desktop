@@ -7,7 +7,7 @@
 
 #include "msxsession.h"
 
-@interface AppDelegate : NSObject <NSApplicationDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 
 - (instancetype)initWithSession:(msxsession *)session;
 

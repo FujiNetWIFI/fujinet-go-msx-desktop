@@ -1477,7 +1477,13 @@ static NSTextField *bpCell(NSString *text, CGFloat width, BOOL bold)
     size_t len = 0;
     if (n < 0) n = 0;
 
-    if (!msxsession_fujinet_running(_session))
+    if (msxsession_fujinet_external(_session))
+        _fujiNote.stringValue = [NSString
+            stringWithFormat:@"External FujiNet %s, cartridge %s.",
+                             msxsession_fujinet_endpoint(_session),
+                             msxsession_fujinet_link(_session)
+                                 ? "connected" : "not connected"];
+    else if (!msxsession_fujinet_running(_session))
         _fujiNote.stringValue = @"FujiNet is off (disabled, or its runtime did not start).";
     else
         _fujiNote.stringValue = msxsession_fujinet_link(_session)

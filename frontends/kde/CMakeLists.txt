@@ -23,6 +23,7 @@ set(KDE_APP_ID online.fujinet.go.msx.kde)
 add_executable(fujinet-go-msx-kde
   main.cpp
   MainWindow.cpp
+  SettingsDialog.cpp
   DisplayWidget.cpp
   FujiNetWindows.cpp
   debugger/DebuggerWindow.cpp

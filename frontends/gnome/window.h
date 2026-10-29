@@ -17,6 +17,8 @@ G_DECLARE_FINAL_TYPE(MsxWindow, msx_window, MSX, WINDOW,
 
 GtkWidget *msx_window_new(AdwApplication *app, msxsession *session);
 void msx_window_toast(MsxWindow *self, const char *message);
+/* Stops and starts the session again from the settings (FujiNet options). */
+void msx_window_restart_session(MsxWindow *self);
 
 /* main.c: the icon name to use, which differs between an installed app and
  * one running out of the build tree. */

@@ -107,6 +107,10 @@ void        msxsession_settings_flush(msxsession *s);
 typedef struct {
     const char *machine; /* an MSXSESSION_MACHINE_* id, or a profile id (M4) */
     int enable_fujinet;  /* start the in-process FujiNet runtime */
+    int external_fujinet; /* 1: don't start it; connect to another FujiNet
+                           * instance at fujinet_addr instead */
+    const char *fujinet_addr; /* "host:port" or "port" (external only);
+                               * NULL/"" = 127.0.0.1:65505 */
 } msxsession_start_opts;
 
 /* Fills opts from the settings store (default: C-BIOS MSX2). */
@@ -192,6 +196,17 @@ void msxsession_joystick_button(msxsession *s, int port, int button,
 void msxsession_reset(msxsession *s);
 
 /* ---- FujiNet (M3) ---------------------------------------------------------*/
+/* Parses the "Use external FujiNet" address field: "host:port" (host an IPv4
+ * literal or a host name) or a bare "port". Empty text means the default,
+ * 127.0.0.1:65505. Returns 0 and fills host/port, or -1 when the text is not
+ * an address:port (nothing is written then). */
+int         msxsession_parse_hostport(const char *text, char *host,
+                                      int hostsz, int *port);
+/* 1 when the session was started to connect to an external FujiNet. */
+int         msxsession_fujinet_external(const msxsession *s);
+/* "host:port" openMSX's FujiNet cartridge connects to (the running session's,
+ * or the default 127.0.0.1:65505 before the first start). */
+const char *msxsession_fujinet_endpoint(const msxsession *s);
 int         msxsession_fujinet_running(const msxsession *s);
 /* Whether openMSX's FujiNet cartridge is connected to FujiNet (its socket
  * to MSXSESSION_BOIP_PORT is up). */

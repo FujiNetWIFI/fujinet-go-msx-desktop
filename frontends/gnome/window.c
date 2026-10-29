@@ -27,6 +27,7 @@
 
 #include "debugger/dbg_window.h"
 #include "display.h"
+#include "prefs.h"
 
 struct _MsxWindow {
     AdwApplicationWindow parent_instance;
@@ -41,6 +42,15 @@ G_DEFINE_FINAL_TYPE(MsxWindow, msx_window, ADW_TYPE_APPLICATION_WINDOW)
 void msx_window_toast(MsxWindow *self, const char *message)
 {
     adw_toast_overlay_add_toast(self->toasts, adw_toast_new(message));
+}
+
+void msx_window_restart_session(MsxWindow *self)
+{
+    msxsession_start_opts opts;
+    msxsession_stop(self->session);
+    msxsession_default_opts(self->session, &opts);
+    if (msxsession_start(self->session, &opts) != 0)
+        msx_window_toast(self, msxsession_last_error(self->session));
 }
 
 /* ---- keyboard capture ---------------------------------------------------
@@ -193,6 +203,10 @@ static void action_fujinet_config(GSimpleAction *action, GVariant *param,
     GtkUriLauncher *launcher;
     (void)action;
     (void)param;
+    if (msxsession_fujinet_external(self->session)) {
+        msx_window_toast(self, "FujiNet is external: use its own web UI");
+        return;
+    }
     /* No embedded WebKitGTK view yet (M5+); open the system browser. */
     launcher = gtk_uri_launcher_new(msxsession_fujinet_webui_url(self->session));
     gtk_uri_launcher_launch(launcher, GTK_WINDOW(self), NULL, NULL, NULL);
@@ -267,6 +281,10 @@ static void action_fujinet_log(GSimpleAction *action, GVariant *param,
     (void)action;
     (void)param;
 
+    if (msxsession_fujinet_external(self->session)) {
+        msx_window_toast(self, "FujiNet is external: see its own console");
+        return;
+    }
     if (log_win) {
         gtk_window_present(GTK_WINDOW(log_win->window));
         return;
@@ -294,6 +312,15 @@ static void action_fujinet_log(GSimpleAction *action, GVariant *param,
     log_refresh(lw);
     lw->timer = g_timeout_add_seconds(1, log_refresh, lw);
     gtk_window_present(GTK_WINDOW(lw->window));
+}
+
+static void action_fujinet_prefs(GSimpleAction *action, GVariant *param,
+                                 gpointer user_data)
+{
+    MsxWindow *self = MSX_WINDOW(user_data);
+    (void)action;
+    (void)param;
+    msx_prefs_show(self, self->session);
 }
 
 static void action_debugger(GSimpleAction *action, GVariant *param,
@@ -330,6 +357,7 @@ static const GActionEntry win_actions[] = {
     {.name = "import-media", .activate = action_import_media},
     {.name = "fujinet-config", .activate = action_fujinet_config},
     {.name = "fujinet-log", .activate = action_fujinet_log},
+    {.name = "fujinet-prefs", .activate = action_fujinet_prefs},
     {.name = "debugger", .activate = action_debugger},
     {.name = "about", .activate = action_about},
 };
@@ -366,6 +394,7 @@ static GMenu *build_menu(msxsession *session)
                  "win.import-media");
     g_menu_append_section(menu, "Media", G_MENU_MODEL(media));
 
+    g_menu_append(fujinet, "FujiNet Preferences…", "win.fujinet-prefs");
     g_menu_append(fujinet, "FujiNet Configuration…", "win.fujinet-config");
     g_menu_append(fujinet, "FujiNet Console Log…", "win.fujinet-log");
     g_menu_append_section(menu, "FujiNet", G_MENU_MODEL(fujinet));

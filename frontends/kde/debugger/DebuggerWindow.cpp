@@ -945,7 +945,12 @@ void DebuggerWindow::refreshFujinet(bool force)
     static msx_fuji_packet p[TRACE_MAX];
     static char state[2048];
     const int n = msxdebug_fujinet_trace(m_dbg, p, TRACE_MAX);
-    if (!msxsession_fujinet_running(m_session))
+    if (msxsession_fujinet_external(m_session))
+        m_fujiNote->setText(QStringLiteral("External FujiNet %1, cartridge %2.")
+                                .arg(QString::fromUtf8(msxsession_fujinet_endpoint(m_session)))
+                                .arg(msxsession_fujinet_link(m_session) ? QStringLiteral("connected")
+                                                                        : QStringLiteral("not connected")));
+    else if (!msxsession_fujinet_running(m_session))
         m_fujiNote->setText(QStringLiteral("FujiNet is off (disabled, or its runtime did not start)."));
     else
         m_fujiNote->setText(msxsession_fujinet_link(m_session)

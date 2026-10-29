@@ -22,6 +22,10 @@ private:
     void importMedia();
     void status(const QString &message);
     void showDebugger();
+    void showPreferences();
+    void showFujiNetConfig();
+    void showFujiNetLog();
+    void restartSession();
 
     msxsession *m_session;
     DisplayWidget *m_display;

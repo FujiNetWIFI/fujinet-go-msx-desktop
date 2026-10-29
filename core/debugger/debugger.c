@@ -1552,6 +1552,8 @@ int msxdebug_fujinet_state(msxdebug *d, char *dst, int dstsz)
     if (!d) return 0;
     return fujitrace_format_state(d->session->fuji_trace,
                                   msxsession_fujinet_running(d->session),
+                                  msxsession_fujinet_external(d->session),
                                   msxsession_fujinet_link(d->session),
-                                  MSXSESSION_BOIP_PORT, dst, dstsz);
+                                  msxsession_fujinet_endpoint(d->session),
+                                  dst, dstsz);
 }

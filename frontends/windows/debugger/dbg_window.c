@@ -848,7 +848,11 @@ static void refresh_fujinet(debugger *d, int force)
     size_t len = 0;
     int n = msxdebug_fujinet_trace(d->dbg, p, TRACE_MAX), i, follow;
 
-    if (!msxsession_fujinet_running(d->session))
+    if (msxsession_fujinet_external(d->session))
+        snprintf(note, sizeof note, "External FujiNet %s, cartridge %s.",
+                 msxsession_fujinet_endpoint(d->session),
+                 msxsession_fujinet_link(d->session) ? "connected" : "not connected");
+    else if (!msxsession_fujinet_running(d->session))
         snprintf(note, sizeof note, "FujiNet is off (disabled, or its runtime did not start).");
     else
         snprintf(note, sizeof note, "FujiNet is on, cartridge %s.",

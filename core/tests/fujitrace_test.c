@@ -69,11 +69,14 @@ int main(void)
 
     /* Empty. */
     CHECK(fujitrace_packets(t, p, FUJITRACE_MAX) == 0);
-    fujitrace_format_state(t, 0, 0, 65505, state, sizeof(state));
+    fujitrace_format_state(t, 0, 0, 0, "127.0.0.1:65505", state, sizeof(state));
     CHECK(strstr(state, "FujiNet    off") != NULL);
     CHECK(strstr(state, "not connected to\n           127.0.0.1:65505") != NULL);
     CHECK(strstr(state, "0 bytes, 0 packets") != NULL);
     CHECK(strstr(state, "Trace      0 of 512 packets") != NULL);
+    fujitrace_format_state(t, 0, 1, 0, "10.1.2.3:65505", state, sizeof(state));
+    CHECK(strstr(state, "FujiNet    external") != NULL);
+    CHECK(strstr(state, "not connected to\n           10.1.2.3:65505") != NULL);
 
     /* A request, byte by byte, and its reply in three pieces, one of them
      * cut between an escape and what it escapes. */
@@ -201,7 +204,7 @@ int main(void)
 
     /* The counts survive a clear; the packets do not. */
     fujitrace_clear(t);
-    fujitrace_format_state(t, 1, 1, 65505, state, sizeof(state));
+    fujitrace_format_state(t, 1, 0, 1, "127.0.0.1:65505", state, sizeof(state));
     CHECK(strstr(state, "FujiNet    running") != NULL);
     CHECK(strstr(state, "Cartridge  connected to\n") != NULL);
     CHECK(strstr(state, "Trace      0 of 512 packets") != NULL);

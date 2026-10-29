@@ -8,9 +8,9 @@
  * line-for-line: MSX has no CoCo-style TV-input/Artifact-Colour/CPU radio
  * menus, and no configurable aspect_mode/smooth_scaling settings at all --
  * openMSX's own FrameSource::getLinePtr640_480() fixes the frame geometry
- * before msxsession ever sees it (see DisplayView.m), so there is no
- * Settings window here, and no WKWebView either: FujiNet Configuration
- * opens the system browser (msxsession_fujinet_webui_url), matching the
+ * before msxsession ever sees it (see DisplayView.m), so the only settings
+ * window is the FujiNet one, and there is no WKWebView either: FujiNet
+ * Configuration opens the system browser (msxsession_fujinet_webui_url), matching the
  * GNOME frontend's own GtkUriLauncher choice -- neither sibling embeds a
  * web view for this yet. Machine is a fixed 3-entry radio group
  * (MSX/MSX2/MSX2+, from msxsession.h's MSXSESSION_MACHINE_* constants),
@@ -63,6 +63,9 @@ static NSInteger machineIndex(const char *machineId)
     NSWindow *_logWindow;
     NSTextView *_logView;
     NSTimer *_logTimer;
+    NSWindow *_settingsWindow;
+    NSTextField *_externalField;
+    BOOL _sessionDirty;
 }
 
 - (instancetype)initWithSession:(msxsession *)session
@@ -71,6 +74,17 @@ static NSInteger machineIndex(const char *machineId)
     if (self)
         _session = session;
     return self;
+}
+
+/* ---- session helpers ---------------------------------------------------- */
+
+- (void)restartSession
+{
+    msxsession_stop(_session);
+    msxsession_start_opts opts;
+    msxsession_default_opts(_session, &opts);
+    if (msxsession_start(_session, &opts) != 0)
+        NSLog(@"session restart: %s", msxsession_last_error(_session));
 }
 
 /* ---- actions ---------------------------------------------------------------- */
@@ -107,6 +121,14 @@ static NSInteger machineIndex(const char *machineId)
 - (void)showFujiNetConfig:(id)sender
 {
     (void)sender;
+    if (msxsession_fujinet_external(_session)) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"FujiNet is external";
+        alert.informativeText = @"Use the web UI of the FujiNet instance "
+                                @"this app connects to.";
+        [alert runModal];
+        return;
+    }
     NSString *url = [NSString
         stringWithUTF8String:msxsession_fujinet_webui_url(_session)];
     [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:url]];
@@ -115,6 +137,14 @@ static NSInteger machineIndex(const char *machineId)
 - (void)showFujiNetLog:(id)sender
 {
     (void)sender;
+    if (msxsession_fujinet_external(_session)) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"FujiNet is external";
+        alert.informativeText = @"Its console output is in the process "
+                                @"that is running it.";
+        [alert runModal];
+        return;
+    }
     if (_logWindow) {
         [_logWindow makeKeyAndOrderFront:nil];
         return;
@@ -184,6 +214,125 @@ static NSInteger machineIndex(const char *machineId)
 {
     (void)sender;
     [DebuggerWindow toggleForSession:_session];
+}
+
+/* ---- preferences -------------------------------------------------------- */
+
+/* The FujiNet section only: use the built-in FujiNet, or an external one at
+ * host:port. Values write straight through to the shared settings store, the
+ * same keys as the GNOME and KDE frontends; the session restarts when the
+ * window closes. */
+
+- (void)externalToggled:(NSButton *)sender
+{
+    const int on = sender.state == NSControlStateValueOn ? 1 : 0;
+    _externalField.enabled = on != 0;
+    if (msxsession_get_int(_session, "fujinet_external", 0) == on)
+        return;
+    msxsession_set_int(_session, "fujinet_external", on);
+    _sessionDirty = YES;
+}
+
+/* The address field: valid text (or none, meaning 127.0.0.1:65505) is
+ * saved; anything else is shown in red and not saved. */
+- (void)externalAddrChanged:(id)sender
+{
+    NSTextField *field = sender;
+    NSString *text = [field.stringValue
+        stringByTrimmingCharactersInSet:NSCharacterSet
+                                            .whitespaceAndNewlineCharacterSet];
+    char host[128];
+    int port;
+    if (msxsession_parse_hostport(text.UTF8String, host, sizeof host,
+                                  &port) != 0) {
+        field.textColor = NSColor.systemRedColor;
+        return;
+    }
+    field.textColor = NSColor.controlTextColor;
+    if (strcmp(msxsession_get_str(_session, "fujinet_external_addr", ""),
+               text.UTF8String) == 0)
+        return;
+    msxsession_set_str(_session, "fujinet_external_addr", text.UTF8String);
+    _sessionDirty = YES;
+}
+
+- (void)showFujiNetPrefs:(id)sender
+{
+    (void)sender;
+    if (_settingsWindow) {
+        [_settingsWindow makeKeyAndOrderFront:nil];
+        return;
+    }
+
+    NSButton *box = [NSButton checkboxWithTitle:@""
+                                         target:self
+                                         action:@selector(externalToggled:)];
+    box.state = msxsession_get_int(_session, "fujinet_external", 0)
+                    ? NSControlStateValueOn
+                    : NSControlStateValueOff;
+    _externalField = [NSTextField textFieldWithString:@(
+        msxsession_get_str(_session, "fujinet_external_addr", ""))];
+    _externalField.placeholderString = @"127.0.0.1:65505";
+    _externalField.preferredMaxLayoutWidth = 240;
+    _externalField.enabled = box.state == NSControlStateValueOn;
+    _externalField.target = self;
+    _externalField.action = @selector(externalAddrChanged:);
+    [_externalField.cell setSendsActionOnEndEditing:YES];
+
+    NSTextField *title = [NSTextField labelWithString:@"FujiNet"];
+    title.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+    NSArray<NSArray<NSView *> *> *rows = @[
+        @[ title, [NSTextField labelWithString:@""] ],
+        @[ [NSTextField labelWithString:@"Use external FujiNet"], box ],
+        @[ [NSTextField labelWithString:@"Address:port"], _externalField ],
+    ];
+    NSGridView *grid = [NSGridView gridViewWithViews:rows];
+    grid.rowSpacing = 8;
+    grid.columnSpacing = 12;
+    [grid columnAtIndex:0].xPlacement = NSGridCellPlacementTrailing;
+
+    NSTextField *note = [NSTextField
+        labelWithString:@"Skips the built-in FujiNet and connects to another "
+                        @"instance already running.\nUse its [BOIP] listen "
+                        @"port (65505 by default). The session restarts "
+                        @"when this window closes."];
+    note.font = [NSFont systemFontOfSize:NSFont.smallSystemFontSize];
+    note.textColor = NSColor.secondaryLabelColor;
+
+    NSStackView *root = [NSStackView stackViewWithViews:@[ grid, note ]];
+    root.orientation = NSUserInterfaceLayoutOrientationVertical;
+    root.alignment = NSLayoutAttributeLeading;
+    root.spacing = 12;
+    root.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
+
+    _settingsWindow = [[NSWindow alloc]
+        initWithContentRect:NSMakeRect(0, 0, 460, 180)
+                  styleMask:NSWindowStyleMaskTitled |
+                            NSWindowStyleMaskClosable |
+                            NSWindowStyleMaskMiniaturizable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    _settingsWindow.title = @"FujiNet Preferences";
+    _settingsWindow.releasedWhenClosed = NO;
+    _settingsWindow.delegate = self;
+    _settingsWindow.contentView = root;
+    [_settingsWindow center];
+    [_settingsWindow makeKeyAndOrderFront:nil];
+}
+
+/* Options are collected while the window is open and applied in one restart
+ * when it closes. */
+- (void)windowWillClose:(NSNotification *)note
+{
+    if (note.object != _settingsWindow)
+        return;
+    [_settingsWindow makeFirstResponder:nil]; /* commit a field edit */
+    _settingsWindow = nil;
+    _externalField = nil;
+    if (!_sessionDirty)
+        return;
+    _sessionDirty = NO;
+    [self restartSession];
 }
 
 /* ---- menus -------------------------------------------------------------------- */
@@ -271,6 +420,9 @@ static NSInteger machineIndex(const char *machineId)
 
     NSMenuItem *fujiItem = [[NSMenuItem alloc] init];
     NSMenu *fuji = [[NSMenu alloc] initWithTitle:@"FujiNet"];
+    [fuji addItem:[self item:@"Preferences…"
+                      action:@selector(showFujiNetPrefs:)
+                         key:@","]];
     [fuji addItem:[self item:@"Configuration…"
                       action:@selector(showFujiNetConfig:)
                          key:@""]];

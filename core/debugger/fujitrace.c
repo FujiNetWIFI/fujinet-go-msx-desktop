@@ -236,12 +236,11 @@ void fujitrace_clear(fujitrace *t)
     pthread_mutex_unlock(&t->mtx);
 }
 
-int fujitrace_format_state(fujitrace *t, int running, int link, int port,
-                           char *dst, int dstsz)
+int fujitrace_format_state(fujitrace *t, int running, int external, int link,
+                           const char *where, char *dst, int dstsz)
 {
     unsigned long long bytes[3] = {0, 0, 0}, packets[3] = {0, 0, 0}, dbc = 0;
     int count = 0, i, n;
-    char where[64];
 
     if (!dst || dstsz <= 0) return 0;
     if (t) {
@@ -254,7 +253,6 @@ int fujitrace_format_state(fujitrace *t, int running, int link, int port,
         count = t->count;
         pthread_mutex_unlock(&t->mtx);
     }
-    snprintf(where, sizeof(where), "127.0.0.1:%d", port);
     /* Narrow lines: the pane is about 36 columns. */
     n = snprintf(dst, (size_t)dstsz,
                  "FujiNet    %s\n"
@@ -272,7 +270,7 @@ int fujitrace_format_state(fujitrace *t, int running, int link, int port,
                  "  %llu bytes, %llu DBC acks\n"
                  "\n"
                  "Trace      %d of %d packets\n",
-                 running ? "running" : "off",
+                 external ? "external" : running ? "running" : "off",
                  link ? "connected to" : "not connected to", where,
                  bytes[FUJITRACE_TX], packets[FUJITRACE_TX],
                  bytes[FUJITRACE_RX], packets[FUJITRACE_RX], dbc,

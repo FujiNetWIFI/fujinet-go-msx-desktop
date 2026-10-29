@@ -39,6 +39,9 @@
 #include <thread>
 #include <vector>
 
+// Defined in the patched src/serial/FujiNet.cc (patch-staged-tree.py).
+extern "C" void fujinet_go_set_endpoint(const char* host, int port);
+
 namespace {
 
 // --- frame sink --------------------------------------------------------
@@ -452,6 +455,10 @@ void msxhost_set_fujinet_trace(MsxFujiTraceSink sink, void* user) {
     std::lock_guard<std::mutex> lk(g_fuji_trace_mutex);
     g_fuji_trace_sink = sink;
     g_fuji_trace_user = user;
+}
+
+void msxhost_set_fujinet_endpoint(const char* host, int port) {
+    fujinet_go_set_endpoint(host, port);
 }
 
 int msxhost_fujinet_link_up(void) {

@@ -67,6 +67,8 @@ struct msxsession {
     /* ---- FujiNet runtime (fujinet_runtime.c, M3) ---- */
     int fujinet_loaded;
     int fujinet_running;
+    int fujinet_external;      /* connecting to a FujiNet that isn't ours */
+    char fujinet_endpoint[80]; /* "host:port" for display */
 
     /* ---- debugger (M6) ---- */
     msxdebug *debugger;

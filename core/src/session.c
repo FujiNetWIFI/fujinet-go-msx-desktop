@@ -167,6 +167,85 @@ void msxsession_default_opts(msxsession *s, msxsession_start_opts *opts)
      * -- which msxsession_start does, copying it into cur_machine. */
     opts->machine = msxsession_get_str(s, "machine", MSXSESSION_MACHINE_MSX2);
     opts->enable_fujinet = msxsession_get_int(s, "enable_fujinet", 1);
+    opts->external_fujinet = msxsession_get_int(s, "fujinet_external", 0);
+    opts->fujinet_addr = msxsession_get_str(s, "fujinet_external_addr", NULL);
+}
+
+static int host_char_ok(int ch)
+{
+    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+           (ch >= '0' && ch <= '9') || ch == '-' || ch == '.' || ch == '_';
+}
+
+int msxsession_parse_hostport(const char *text, char *host, int hostsz,
+                              int *port)
+{
+    char buf[160], *colon, *end;
+    const char *hst = "127.0.0.1";
+    long num = MSXSESSION_BOIP_PORT;
+    size_t len;
+
+    if (!text) text = "";
+    while (*text == ' ' || *text == '\t') text++;
+    len = strlen(text);
+    while (len && (text[len - 1] == ' ' || text[len - 1] == '\t' ||
+                   text[len - 1] == '\n' || text[len - 1] == '\r'))
+        len--;
+    if (len >= sizeof(buf)) return -1;
+    memcpy(buf, text, len);
+    buf[len] = '\0';
+
+    if (len) {
+        colon = strrchr(buf, ':');
+        if (colon) {
+            *colon = '\0';
+            hst = buf;
+            if (!*hst) return -1;
+            text = colon + 1;
+        } else {
+            text = buf;
+        }
+        if (!*text) return -1;
+        num = strtol(text, &end, 10);
+        if (*end || num < 1 || num > 65535) return -1;
+        if (colon) {
+            /* An IPv4 literal or a host name (resolved when it connects). */
+            int dots = 0, digits = 0, all_num = 1;
+            const char *ptr;
+            for (ptr = hst; *ptr; ptr++) {
+                if (!host_char_ok((unsigned char)*ptr)) return -1;
+                if (*ptr == '.') dots++;
+                else if (*ptr >= '0' && *ptr <= '9') digits++;
+                else all_num = 0;
+            }
+            if (hst[0] == '.' || hst[strlen(hst) - 1] == '.' ||
+                strstr(hst, "..")) return -1;
+            if (all_num && digits) {
+                /* Digits and dots only: has to be a whole IPv4 literal. */
+                int oct[4], used = 0, idx;
+                if (dots != 3 ||
+                    sscanf(hst, "%d.%d.%d.%d%n", &oct[0], &oct[1], &oct[2],
+                           &oct[3], &used) != 4 || hst[used])
+                    return -1;
+                for (idx = 0; idx < 4; idx++)
+                    if (oct[idx] < 0 || oct[idx] > 255) return -1;
+            }
+        }
+    }
+    if ((int)strlen(hst) >= hostsz) return -1;
+    memcpy(host, hst, strlen(hst) + 1);
+    *port = (int)num;
+    return 0;
+}
+
+int msxsession_fujinet_external(const msxsession *s)
+{
+    return s->fujinet_external;
+}
+
+const char *msxsession_fujinet_endpoint(const msxsession *s)
+{
+    return s->fujinet_endpoint[0] ? s->fujinet_endpoint : "127.0.0.1:65505";
 }
 
 int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
@@ -205,8 +284,32 @@ int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
      * listen delay -- see fujinet_runtime.c. A missing or broken runtime is
      * not fatal: the machine still boots, just without FujiNet, and
      * openMSX's own connect loop keeps retrying regardless. */
-    if (opts->enable_fujinet && fujinet_start(s) == 0)
-        fujinet_wait_for_boip(s, 10000);
+    s->fujinet_external = 0;
+    snprintf(s->fujinet_endpoint, sizeof(s->fujinet_endpoint),
+             "127.0.0.1:%d", MSXSESSION_BOIP_PORT);
+    if (opts->external_fujinet) {
+        /* Another FujiNet instance is already listening there: nothing to
+         * start or wait for, openMSX's connect loop does the rest. */
+        char host[128];
+        int port;
+        if (msxsession_parse_hostport(opts->fujinet_addr, host, sizeof(host),
+                                      &port) != 0) {
+            session_set_error(s, "\"%s\" is not an address:port for the "
+                              "external FujiNet (example: 127.0.0.1:65505)",
+                              opts->fujinet_addr ? opts->fujinet_addr : "");
+            pthread_mutex_unlock(&s->lifecycle_mtx);
+            return -1;
+        }
+        s->fujinet_external = 1;
+        s->webui_url[0] = '\0';
+        snprintf(s->fujinet_endpoint, sizeof(s->fujinet_endpoint), "%s:%d",
+                 host, port);
+        msxhost_set_fujinet_endpoint(host, port);
+    } else {
+        msxhost_set_fujinet_endpoint("127.0.0.1", MSXSESSION_BOIP_PORT);
+        if (opts->enable_fujinet && fujinet_start(s) == 0)
+            fujinet_wait_for_boip(s, 10000);
+    }
 
     msxhost_set_frame_sink(on_core_frame, s);
     /* The FujiNet trace is always on: it is cheap, and it is most useful
@@ -243,6 +346,7 @@ void msxsession_stop(msxsession *s)
     msxhost_set_frame_sink(NULL, NULL);
     msxhost_set_fujinet_trace(NULL, NULL);
     fujinet_stop(s);
+    s->fujinet_external = 0;
     s->running = 0;
     pthread_mutex_unlock(&s->lifecycle_mtx);
     if (s->debugger) msxdebug_machine_changed(s->debugger, 1);

@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Fifteen patches:
+Sixteen patches:
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -378,6 +378,15 @@ an on-screen keyboard's synthetic back-to-back press+release.
     socket connecting (readSocket()) and closing (close(), which is also
     the failed-connect path). Nothing else changes: bytes are reported
     only once sent, and the cartridge's behaviour is untouched.
+
+16. src/serial/FujiNet.cc: the endpoint the cartridge connects to is
+    settable. Upstream hard-codes IPv4 loopback on FUJINET_DEFAULT_PORT; the
+    "Use external FujiNet" setting needs any host:port. The patch adds an
+    extern "C" setter, fujinet_go_set_endpoint(host, port), that
+    core/openmsx/msx_host.cc calls before the machine boots, and resolves
+    the stored host with getaddrinfo (IPv4) on every connect attempt, so a
+    host name works and a changed DNS entry is picked up on the next retry.
+    Without a call the endpoint stays 127.0.0.1:FUJINET_DEFAULT_PORT.
 """
 import sys
 
@@ -1286,6 +1295,97 @@ def patch_fujinet_trace_hook(stage_dir: str) -> None:
     print(f"Patched {path}: FujiNet trace and link hooks")
 
 
+def patch_fujinet_endpoint(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/serial/FujiNet.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "fujinet_go_set_endpoint"
+    if marker in text:
+        return  # already patched
+
+    def swap(old: str, new: str, what: str) -> None:
+        nonlocal text
+        if old not in text:
+            fail(f"{path}: {what} anchor not found "
+                 "(openMSX source has drifted from the pinned commit?)")
+        text = text.replace(old, new, 1)
+
+    swap("#include <stdio.h>\n",
+         "#include <stdio.h>\n"
+         "#include <cstring>\n"
+         "#include <mutex>\n"
+         "#include <string>\n"
+         "#ifdef _WIN32\n"
+         "#include <ws2tcpip.h>\n"
+         "#else\n"
+         "#include <netdb.h>\n"
+         "#endif\n",
+         "'#include <stdio.h>'")
+
+    # The setter and the resolver, right after the trace hook declarations
+    # patch_fujinet_trace_hook() puts at the top of the namespace.
+    swap('extern "C" void msxhost_fujinet_link(int up);\n',
+         'extern "C" void msxhost_fujinet_link(int up);\n'
+         "\n"
+         "// FujiNet Go MSX (desktop): where to connect -- see\n"
+         "// tools/openmsx/patches/patch-staged-tree.py. Set by\n"
+         "// core/openmsx/msx_host.cc before the machine boots; read by the\n"
+         "// reader thread on every connect attempt.\n"
+         "static std::mutex fujinetGoEndpointMutex;\n"
+         'static std::string fujinetGoHost = "127.0.0.1";\n'
+         "static int fujinetGoPort = FUJINET_DEFAULT_PORT;\n"
+         "\n"
+         'extern "C" void fujinet_go_set_endpoint(const char* host, int port)\n'
+         "{\n"
+         "\tstd::lock_guard<std::mutex> lock(fujinetGoEndpointMutex);\n"
+         "\tfujinetGoHost = (host && *host) ? host : \"127.0.0.1\";\n"
+         "\tfujinetGoPort = (port > 0 && port < 65536) ? port\n"
+         "\t                                         : FUJINET_DEFAULT_PORT;\n"
+         "}\n"
+         "\n"
+         "static bool fujinetGoResolve(sockaddr_in& addr)\n"
+         "{\n"
+         "\tstd::string host;\n"
+         "\tint port;\n"
+         "\t{\n"
+         "\t\tstd::lock_guard<std::mutex> lock(fujinetGoEndpointMutex);\n"
+         "\t\thost = fujinetGoHost;\n"
+         "\t\tport = fujinetGoPort;\n"
+         "\t}\n"
+         "\taddrinfo hints{};\n"
+         "\thints.ai_family = AF_INET;\n"
+         "\thints.ai_socktype = SOCK_STREAM;\n"
+         "\taddrinfo* found = nullptr;\n"
+         "\tif (getaddrinfo(host.c_str(), nullptr, &hints, &found) != 0 || !found) {\n"
+         "\t\treturn false;\n"
+         "\t}\n"
+         "\tstd::memcpy(&addr, found->ai_addr, sizeof(addr));\n"
+         "\tfreeaddrinfo(found);\n"
+         "\taddr.sin_family = AF_INET;\n"
+         "\taddr.sin_port = htons(uint16_t(port));\n"
+         "\treturn true;\n"
+         "}\n",
+         "trace hook declarations")
+
+    swap("\t\t\tsockaddr_in addr{};\n"
+         "\t\t\taddr.sin_family = AF_INET;\n"
+         "\t\t\taddr.sin_port = htons(FUJINET_DEFAULT_PORT);\n"
+         "\t\t\taddr.sin_addr.s_addr =\n"
+         "\t\t\t        htonl(INADDR_LOOPBACK); // 127.0.0.1\n",
+         "\t\t\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\t\t\tsockaddr_in addr{};\n"
+         "\t\t\tif (!fujinetGoResolve(addr)) {\n"
+         "\t\t\t\tclose();\n"
+         "\t\t\t\tTimer::sleep(1'000'000); // retry once per second\n"
+         "\t\t\t\tcontinue;\n"
+         "\t\t\t}\n",
+         "readSocket() address")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: settable FujiNet endpoint")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -1305,6 +1405,7 @@ def main() -> None:
     patch_msysutils_python3_fixes(stage_dir)
     patch_windows_interface_macro(stage_dir)
     patch_fujinet_trace_hook(stage_dir)
+    patch_fujinet_endpoint(stage_dir)
 
 
 if __name__ == "__main__":

@@ -172,6 +172,22 @@ target_link_libraries(fujitrace_test PRIVATE msxsession)
 target_include_directories(fujitrace_test PRIVATE "${CMAKE_SOURCE_DIR}/core/debugger")
 add_test(NAME fujitrace_test COMMAND fujitrace_test)
 
+# The external-FujiNet address field's parser: host:port, a bare port, the
+# default, and what must be refused. Needs neither openMSX running nor a
+# FujiNet runtime.
+add_executable(hostport_test tests/hostport_test.c)
+target_link_libraries(hostport_test PRIVATE msxsession)
+add_test(NAME hostport COMMAND hostport_test)
+
+# "Use external FujiNet" end to end: a stand-in listener plays the external
+# FujiNet and the cartridge has to dial it, with no runtime of our own
+# started. Needs openMSX but not the FujiNet runtime. POSIX sockets only
+# (exits 77, a ctest SKIP, on Windows).
+add_executable(external_smoke tests/external_smoke.c)
+target_link_libraries(external_smoke PRIVATE msxsession)
+add_test(NAME external_smoke COMMAND external_smoke)
+set_tests_properties(external_smoke PROPERTIES TIMEOUT 60 SKIP_RETURN_CODE 77)
+
 # M6 gate: the debugger engine (pause/step/breakpoints/disassembly) against
 # a real running boot, including a persistent breakpoint firing
 # autonomously and being delivered through the engine's own poll thread.

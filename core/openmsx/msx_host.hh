@@ -175,6 +175,12 @@ void msxhost_set_fujinet_trace(MsxFujiTraceSink sink, void* user);
 /* Whether the cartridge's socket to FujiNet is connected. */
 int msxhost_fujinet_link_up(void);
 
+/* Where the cartridge connects to FujiNet (host name or IPv4 literal, and
+ * port; resolved with getaddrinfo on every connect attempt). Takes effect on
+ * the next attempt, so call it before msxhost_core_start(). Without a call
+ * the patched cartridge uses 127.0.0.1 and its compiled-in port. */
+void msxhost_set_fujinet_endpoint(const char* host, int port);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif
