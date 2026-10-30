@@ -50,6 +50,13 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.0" date="2026-10-29">
+      <description>
+        <p>
+          New: use an external FujiNet. A switch in Preferences makes the app connect to another FujiNet instance at a host:port you enter (for example 127.0.0.1:65505) instead of starting the built-in one.
+        </p>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-10-27">
       <description>
         <p>

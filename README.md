@@ -80,6 +80,10 @@ On Windows the picture is drawn with Direct3D 11 on its own render thread
 (`MSX_RENDERER=gdi` forces the GDI fallback; `MSX_FPS=1` prints the frame
 rates).
 
+## External FujiNet
+
+A switch in Preferences makes the app connect to another FujiNet instance at a host:port you enter, e.g. `127.0.0.1:65505`, instead of starting the built-in one.
+
 ## Building
 
 ```sh
