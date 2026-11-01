@@ -10,7 +10,7 @@
 
 #include "msxsession.h"
 
-class DisplayWidget;
+class DisplayView;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -26,8 +26,9 @@ private:
     void showFujiNetConfig();
     void showFujiNetLog();
     void restartSession();
+    void useSoftwareDisplay();
 
     msxsession *m_session;
-    DisplayWidget *m_display;
+    DisplayView *m_display;
     QActionGroup *m_machineGroup = nullptr;
 };

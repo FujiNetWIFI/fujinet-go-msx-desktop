@@ -5,7 +5,9 @@
 # with the FujiNet runtime in M3). Debugger window added M6.
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(ADW IMPORTED_TARGET libadwaita-1>=1.5 gtk4>=4.10)
+# GTK 4.16 for GdkMemoryTextureBuilder (the display reuses its GPU texture
+# frame to frame).
+pkg_check_modules(ADW IMPORTED_TARGET libadwaita-1>=1.5 gtk4>=4.16)
 
 if(NOT ADW_FOUND)
   message(STATUS "GNOME frontend: libadwaita/gtk4 not found -- skipping")

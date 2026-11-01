@@ -23,6 +23,7 @@
 #include <iterator>
 
 #include "DisplayWidget.h"
+#include "SoftDisplayWidget.h"
 #include "FujiNetWindows.h"
 #include "SettingsDialog.h"
 #include "debugger/DebuggerWindow.h"
@@ -46,12 +47,26 @@ MainWindow::MainWindow(msxsession *session, QWidget *parent)
     setWindowTitle(QStringLiteral("FujiNet Go MSX"));
     resize(960, 780);
 
-    m_display = new DisplayWidget(session, this);
-    setCentralWidget(m_display);
+    auto *gpu = new DisplayWidget(session, this);
+    m_display = gpu;
+    setCentralWidget(gpu);
+    /* No usable GPU device: fall back to painting in software */
+    connect(gpu, &QRhiWidget::renderFailed, this, &MainWindow::useSoftwareDisplay,
+            Qt::QueuedConnection);
     statusBar();
 
     buildMenus();
-    m_display->setFocus();
+    m_display->widget()->setFocus();
+}
+
+void MainWindow::useSoftwareDisplay()
+{
+    if (dynamic_cast<SoftDisplayWidget *>(m_display))
+        return;
+    auto *soft = new SoftDisplayWidget(m_session, this);
+    m_display = soft;
+    setCentralWidget(soft);   /* deletes the GPU display, which stops its feed */
+    soft->setFocus();
 }
 
 void MainWindow::status(const QString &message)
@@ -81,7 +96,7 @@ void MainWindow::showPreferences()
         restartSession();
         status(QStringLiteral("FujiNet options applied (session restarted)"));
     }
-    m_display->setFocus();
+    m_display->widget()->setFocus();
 }
 
 void MainWindow::showFujiNetConfig()
@@ -137,7 +152,7 @@ void MainWindow::buildMenus()
             msxsession_set_machine(m_session, kMachines[i].id);
             status(QStringLiteral("%1 (live switch)")
                        .arg(QString::fromUtf8(kMachines[i].label)));
-            m_display->setFocus();
+            m_display->widget()->setFocus();
         });
     }
 

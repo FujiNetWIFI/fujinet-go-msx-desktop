@@ -252,13 +252,14 @@ int main(void)
 
     /* 9. detach lets the machine run again, and the engine keeps nothing armed. */
     {
-        uint64_t after = serial;
+        /* liveness: a still screen publishes no new frame, so count frames run */
+        uint64_t after = msxsession_frame_count(s);
         int resumed = 0;
         msxdebug_breakpoint_toggle(d, 0x0000);      /* kept across the detach */
         msxdebug_detach(d);
         CHECK(!msxdebug_is_attached(d) && !msxdebug_is_stopped(d), "still attached/stopped after detach");
         for (waited_ms = 0; waited_ms < 5000; waited_ms += 50) {
-            if (msxsession_copy_frame(s, fb, &after)) { resumed = 1; break; }
+            if (msxsession_frame_count(s) > after + 1) { resumed = 1; break; }
             sleep_ms(50);
         }
         CHECK(resumed, "no frames after detach");

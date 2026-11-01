@@ -164,10 +164,11 @@ resume:
     /* Confirm frames resume after continuing -- proof the break/continue
      * round trip left the emulator in a genuinely runnable state. */
     {
-        uint64_t after = serial;
+        /* liveness: a still screen publishes no new frame, so count frames run */
+        uint64_t after = msxsession_frame_count(s);
         int resumed = 0;
         for (waited_ms = 0; waited_ms < 5000; waited_ms += 50) {
-            if (msxsession_copy_frame(s, fb, &after)) { resumed = 1; break; }
+            if (msxsession_frame_count(s) > after + 1) { resumed = 1; break; }
             sleep_ms(50);
         }
         if (!resumed) {

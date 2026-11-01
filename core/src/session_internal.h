@@ -59,6 +59,10 @@ struct msxsession {
     pthread_mutex_t frame_mtx;
     uint32_t *frame; /* MSX_FB_PIXELS XRGB8888, heap: ~1.2MB */
     uint64_t frame_serial;
+    uint64_t frame_count;   /* every frame run, published or not */
+    pthread_mutex_t frame_cb_mtx;   /* held across each callback */
+    msxsession_frame_cb frame_cb;
+    void *frame_cb_ctx;
 
     /* ---- vsync (advisory only; see msxsession_notify_vsync) ---- */
     int64_t vs_ns;

@@ -9,7 +9,8 @@
 # already 23 from the top level -- a strict superset of what Qt6 Widgets
 # needs, so no local override here either.
 
-find_package(Qt6 6.4 COMPONENTS Widgets OpenGLWidgets QUIET)
+# Qt 6.7 for QRhiWidget (the GPU display); ShaderTools bakes its shaders.
+find_package(Qt6 6.7 COMPONENTS Widgets GuiPrivate ShaderTools QUIET)
 
 if(NOT Qt6_FOUND)
   message(STATUS "KDE frontend: Qt6 Widgets not found -- skipping")
@@ -25,12 +26,19 @@ add_executable(fujinet-go-msx-kde
   MainWindow.cpp
   SettingsDialog.cpp
   DisplayWidget.cpp
+  SoftDisplayWidget.cpp
+  FrameFeed.cpp
+  KeyForward.cpp
   FujiNetWindows.cpp
   debugger/DebuggerWindow.cpp
 )
 
 target_link_libraries(fujinet-go-msx-kde PRIVATE
-  msxsession Qt6::Widgets Qt6::OpenGLWidgets)
+  msxsession Qt6::Widgets Qt6::GuiPrivate)
+# The display's shaders, baked for every backend and embedded as resources.
+qt_add_shaders(fujinet-go-msx-kde "display_shaders"
+  PREFIX "/shaders"
+  FILES shaders/display.vert shaders/display.frag)
 target_include_directories(fujinet-go-msx-kde PRIVATE
                            "${CMAKE_CURRENT_SOURCE_DIR}")
 target_compile_options(fujinet-go-msx-kde PRIVATE -Wall -Wextra)

@@ -60,9 +60,39 @@ static void on_core_frame(const uint32_t *px, int w, int h, void *user)
 
     n = (size_t)w * (size_t)h;
     pthread_mutex_lock(&s->frame_mtx);
+    s->frame_count++;
+    /* A frame identical to the one in the slot is not a new frame. */
+    if (s->frame_serial != 0 &&
+        memcmp(s->frame, px, n * sizeof(uint32_t)) == 0) {
+        pthread_mutex_unlock(&s->frame_mtx);
+        return;
+    }
     memcpy(s->frame, px, n * sizeof(uint32_t));
     s->frame_serial++;
     pthread_mutex_unlock(&s->frame_mtx);
+
+    pthread_mutex_lock(&s->frame_cb_mtx);
+    if (s->frame_cb)
+        s->frame_cb(s->frame_cb_ctx);
+    pthread_mutex_unlock(&s->frame_cb_mtx);
+}
+
+void msxsession_set_frame_callback(msxsession *s, msxsession_frame_cb cb,
+                                   void *ctx)
+{
+    pthread_mutex_lock(&s->frame_cb_mtx);
+    s->frame_cb = cb;
+    s->frame_cb_ctx = ctx;
+    pthread_mutex_unlock(&s->frame_cb_mtx);
+}
+
+uint64_t msxsession_frame_count(msxsession *s)
+{
+    uint64_t n;
+    pthread_mutex_lock(&s->frame_mtx);
+    n = s->frame_count;
+    pthread_mutex_unlock(&s->frame_mtx);
+    return n;
 }
 
 /* The FujiNet cartridge's socket bytes (msx_host.hh), on openMSX's thread or
@@ -136,6 +166,7 @@ msxsession *msxsession_new(const msxsession_paths *paths)
 
     pthread_mutex_init(&s->lifecycle_mtx, NULL);
     pthread_mutex_init(&s->frame_mtx, NULL);
+    pthread_mutex_init(&s->frame_cb_mtx, NULL);
     settings_init(s);
     s->fuji_trace = fujitrace_new();
 
@@ -154,6 +185,7 @@ void msxsession_free(msxsession *s)
     settings_free_all(s);
     pthread_mutex_destroy(&s->lifecycle_mtx);
     pthread_mutex_destroy(&s->frame_mtx);
+    pthread_mutex_destroy(&s->frame_cb_mtx);
     free(s->frame);
     free(s);
 }
@@ -318,6 +350,7 @@ int msxsession_start(msxsession *s, const msxsession_start_opts *opts)
     msxhost_select_machine(s->cur_machine);
 
     s->frame_serial = 0;
+    s->frame_count = 0;
 
     if (!msxhost_core_start()) {
         session_set_error(s, "%s", msxhost_last_error());

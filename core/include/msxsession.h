@@ -149,6 +149,22 @@ const char *msxsession_machine(const msxsession *s);
 int  msxsession_copy_frame(msxsession *s, uint32_t *dst,
                            uint64_t *serial_inout);
 
+/* Ask to be told when a new frame is ready, for a frontend with no frame
+ * clock of its own: cb(ctx) runs on the emulator thread after each frame is
+ * published. Keep it quick (post an event and return) and do not call into
+ * the session from it. Passing NULL stops the calls, and returns only after
+ * any call in flight has finished, so ctx may be freed right after.
+ * A frame identical to the previous one is not published again (no serial
+ * change, no callback): most of what a still MSX screen shows does not move. */
+typedef void (*msxsession_frame_cb)(void *ctx);
+void msxsession_set_frame_callback(msxsession *s, msxsession_frame_cb cb,
+                                   void *ctx);
+
+/* Frames the machine has produced since start, including the ones identical
+ * to their predecessor (which are not published again): use it to ask "is
+ * the machine running", not "is the picture changing". */
+uint64_t msxsession_frame_count(msxsession *s);
+
 /* Feed the UI's vsync ticks (frame-clock time, CLOCK_MONOTONIC ns).
  * Advisory only: unlike the sibling targets there is no phase-locked
  * emulator loop to steer with this -- openMSX's own RealTime paces itself,

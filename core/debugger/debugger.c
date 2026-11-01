@@ -70,6 +70,7 @@ struct msxdebug {
     pthread_t poll_thread;
     int poll_thread_running;
     int poll_stop;
+    pthread_cond_t wake;               /* poll thread sleeps here while idle */
 
     int attached;
     int started;                       /* the machine has been brought up */
@@ -260,6 +261,13 @@ static int take_last(void)
     return atoi(buf);
 }
 
+/* Caller holds d->mtx. Every place that can end an idle state signals
+ * d->wake (attach, machine_changed, resume, the run-to-target start). */
+static int poll_idle_locked(const msxdebug *d)
+{
+    return d->paused || !d->started || (!d->attached && !d->transient_id[0]);
+}
+
 static void *poll_thread_fn(void *arg)
 {
     msxdebug *d = arg;
@@ -268,13 +276,21 @@ static void *poll_thread_fn(void *arg)
         int stop_requested, idle;
         char buf[16];
 
+        /* Nothing to watch for (not attached, paused, or no machine yet):
+         * sleep until a state change signals d->wake, instead of waking
+         * every 40 ms for the life of the session. */
+        pthread_mutex_lock(&d->mtx);
+        while (!d->poll_stop && poll_idle_locked(d))
+            pthread_cond_wait(&d->wake, &d->mtx);
+        pthread_mutex_unlock(&d->mtx);
+
         ts.tv_sec = 0;
         ts.tv_nsec = MSXDBG_POLL_INTERVAL_MS * 1000000L;
         nanosleep(&ts, NULL);
 
         pthread_mutex_lock(&d->mtx);
         stop_requested = d->poll_stop;
-        idle = d->paused || !d->started || (!d->attached && !d->transient_id[0]);
+        idle = poll_idle_locked(d);
         pthread_mutex_unlock(&d->mtx);
         if (stop_requested) break;
         if (idle) continue;
@@ -330,6 +346,7 @@ msxdebug *msxdebug_create(msxsession *s)
     d->reason_addr = -1;
     snprintf(d->reason, sizeof(d->reason), "running");
     pthread_mutex_init(&d->mtx, NULL);
+    pthread_cond_init(&d->wake, NULL);
     d->started = msxsession_is_running(s);
     symtabs_load_text(&d->syms, msxdebug_builtin_bios_sym, "bios");
     if (pthread_create(&d->poll_thread, NULL, poll_thread_fn, d) == 0)
@@ -342,10 +359,12 @@ void msxdebug_destroy(msxdebug *d)
     if (!d) return;
     pthread_mutex_lock(&d->mtx);
     d->poll_stop = 1;
+    pthread_cond_signal(&d->wake);
     pthread_mutex_unlock(&d->mtx);
     if (d->poll_thread_running) pthread_join(d->poll_thread, NULL);
     symtabs_free(&d->syms);
     free(d->user_syms);
+    pthread_cond_destroy(&d->wake);
     pthread_mutex_destroy(&d->mtx);
     free(d);
 }
@@ -386,6 +405,7 @@ void msxdebug_attach(msxdebug *d)
     } else {
         d->gen++;       /* armed and stopped when the machine comes up */
     }
+    pthread_cond_signal(&d->wake);
     pthread_mutex_unlock(&d->mtx);
 }
 
@@ -436,6 +456,7 @@ void msxdebug_machine_changed(msxdebug *d, int power_cycled)
         }
     }
     d->gen++;
+    pthread_cond_signal(&d->wake);
     pthread_mutex_unlock(&d->mtx);
 }
 
@@ -474,6 +495,7 @@ void msxdebug_resume(msxdebug *d)
     d->reason_addr = -1;
     d->gen++;
     rpc("debug cont", NULL, 0);
+    pthread_cond_signal(&d->wake);
     pthread_mutex_unlock(&d->mtx);
 }
 
@@ -551,6 +573,7 @@ static void arm_transient_and_go(msxdebug *d, uint16_t target, int use_floor,
     d->paused = 0;
     d->gen++;
     rpc("debug cont", NULL, 0);
+    pthread_cond_signal(&d->wake);
     pthread_mutex_unlock(&d->mtx);
 }
 

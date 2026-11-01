@@ -1,18 +1,5 @@
 /*
- * DisplayWidget: paints the latest emulator frame with QPainter over a
- * QOpenGLWidget, letterboxed to 4:3 (the fixed 640x480 buffer already is
- * 4:3, so no per-mode aspect table is needed here -- see DisplayWidget.h).
- * The frameSwapped signal (vsync-aligned with the default swap interval of
- * 1) feeds the session's (advisory-only, see msxsession.h) vsync
- * notification and schedules the next repaint, forming a self-sustaining
- * present loop.
- *
- * Key events are translated to the X11 keysyms msx_key_from_event expects
- * (core/src/input_map.c), so this frontend and the GNOME one share one
- * mapping table -- the numeric XK_* values here are exactly the ones that
- * file hardcodes, deliberately kept in sync. Both press and release are
- * forwarded: openMSX's Keyboard tracks held keys, so a missed release
- * leaves that key down in the matrix.
+ * DisplayWidget -- see DisplayWidget.h.
  *
  * Copyright (C) 2026 Thomas Cherryhomes
  * SPDX-License-Identifier: GPL-3.0-or-later
@@ -20,184 +7,188 @@
 
 #include "DisplayWidget.h"
 
-#include <QKeyEvent>
-#include <QPainter>
+#include "DisplayGeometry.h"
+#include "KeyForward.h"
 
-#include <ctime>
+#include <QEvent>
+#include <QFile>
+#include <QMatrix4x4>
+#include <QVector4D>
+#include <QWindow>
 
-namespace {
-
-qint64 monotonic_ns()
+static QShader loadShader(const char *path)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (qint64)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+    QFile f(QString::fromLatin1(path));
+    return f.open(QIODevice::ReadOnly) ? QShader::fromSerialized(f.readAll()) : QShader();
 }
-
-/* Qt key code -> X11/xkb keysym, for the keys msx_key_from_event resolves
- * by keysym rather than by character. Values match
- * core/src/input_map.c's XK_* table exactly. */
-quint32 keysymForKey(const QKeyEvent *event)
-{
-    /* F1..F9. F10, F11 and F12 are the frontend's own (menu, fullscreen,
-     * debugger) and never reach here -- event() lets those three through as
-     * shortcuts instead of claiming them. */
-    if (event->key() >= Qt::Key_F1 && event->key() <= Qt::Key_F9)
-        return 0xFFBE + (quint32)(event->key() - Qt::Key_F1);
-
-    switch (event->key()) {
-    case Qt::Key_Return:
-    case Qt::Key_Enter:     return 0xFF0D;
-    case Qt::Key_Escape:    return 0xFF1B;
-    case Qt::Key_Tab:       return 0xFF09;
-    case Qt::Key_Backspace: return 0xFF08;
-    case Qt::Key_Delete:    return 0xFFFF;
-    case Qt::Key_Insert:    return 0xFF63;
-    case Qt::Key_Home:      return 0xFF50;
-    case Qt::Key_End:       return 0xFF57;
-    case Qt::Key_PageUp:    return 0xFF55;
-    case Qt::Key_PageDown:  return 0xFF56;
-    case Qt::Key_Left:      return 0xFF51;
-    case Qt::Key_Up:        return 0xFF52;
-    case Qt::Key_Right:     return 0xFF53;
-    case Qt::Key_Down:      return 0xFF54;
-    /* Modifiers are real MSX keys, so forwarded rather than swallowed. Qt
-     * reports left and right as the same key code for Shift/Control/Alt, so
-     * both land on the left one -- input_map.c's table has no right-hand
-     * equivalent to distinguish anyway for the keys this needs. */
-    case Qt::Key_Shift:     return 0xFFE1; /* Shift_L */
-    case Qt::Key_Control:   return 0xFFE3; /* Control_L */
-    case Qt::Key_Alt:       return 0xFFE9; /* Alt_L */
-    case Qt::Key_AltGr:     return 0xFFEA; /* Alt_R */
-    case Qt::Key_Meta:      return 0xFFEB; /* Super_L */
-    case Qt::Key_CapsLock:  return 0xFFE5;
-    default:                return 0;
-    }
-}
-
-} // namespace
 
 DisplayWidget::DisplayWidget(msxsession *session, QWidget *parent)
-    : QOpenGLWidget(parent),
-      m_session(session),
+    : QRhiWidget(parent), m_session(session), m_feed(new FrameFeed(session, this)),
       m_frame((size_t)MSXSESSION_FB_WIDTH * MSXSESSION_FB_HEIGHT, 0)
 {
     setFocusPolicy(Qt::StrongFocus);
     setMinimumSize(MSXSESSION_FB_WIDTH / 2, MSXSESSION_FB_HEIGHT / 2);
-    connect(this, &QOpenGLWidget::frameSwapped, this,
-            &DisplayWidget::onFrameSwapped, Qt::QueuedConnection);
+    connect(m_feed, &FrameFeed::frameReady, this, &DisplayWidget::onFrame);
 }
 
-void DisplayWidget::onFrameSwapped()
+DisplayWidget::~DisplayWidget()
 {
-    msxsession_notify_vsync(m_session, monotonic_ns());
+    m_feed->setActive(false);
+}
+
+/* ---- idle ------------------------------------------------------------------
+ * A hidden or minimised window has nobody to draw for: the feed unregisters
+ * from the session, so the GUI thread gets no wakeups at all until it is
+ * shown again. The machine itself keeps running (netplay must not stall). */
+
+void DisplayWidget::updateActive()
+{
+    QWidget *w = window();
+    m_feed->setActive(isVisible() && w && !w->isMinimized());
+}
+
+void DisplayWidget::showEvent(QShowEvent *e)
+{
+    QRhiWidget::showEvent(e);
+    if (window())
+        window()->installEventFilter(this);
+    updateActive();
+}
+
+void DisplayWidget::hideEvent(QHideEvent *e)
+{
+    QRhiWidget::hideEvent(e);
+    if (window())
+        window()->removeEventFilter(this);
+    updateActive();
+}
+
+bool DisplayWidget::eventFilter(QObject *watched, QEvent *e)
+{
+    if (e->type() == QEvent::WindowStateChange || e->type() == QEvent::Show ||
+        e->type() == QEvent::Hide)
+        updateActive();
+    return QRhiWidget::eventFilter(watched, e);
+}
+
+bool DisplayWidget::event(QEvent *e)
+{
+    if (msxClaimShortcut(e))
+        return true;
+    /* The compositor can mark a window occluded without minimising it */
+    if (e->type() == QEvent::ScreenChangeInternal || e->type() == QEvent::WindowActivate)
+        updateActive();
+    return QRhiWidget::event(e);
+}
+
+void DisplayWidget::keyPressEvent(QKeyEvent *e) { msxKeyEvent(m_session, e, 1); }
+void DisplayWidget::keyReleaseEvent(QKeyEvent *e) { msxKeyEvent(m_session, e, 0); }
+
+/* ---- frames ---------------------------------------------------------------- */
+
+void DisplayWidget::onFrame()
+{
+    /* straight into the upload source: one copy, and no alpha pass -- the
+     * shader ignores the X byte */
+    if (!msxsession_copy_frame(m_session, m_frame.data(), &m_serial))
+        return;
+    m_have = true;
+    m_dirty = true;
     update();
 }
 
-void DisplayWidget::showEvent(QShowEvent *event)
+/* ---- GPU ------------------------------------------------------------------- */
+
+void DisplayWidget::releaseResources()
 {
-    QOpenGLWidget::showEvent(event);
-    update(); /* kick the frameSwapped/update loop */
+    m_pipeline.reset();
+    m_srb.reset();
+    m_sampler.reset();
+    m_tex.reset();
+    m_ubuf.reset();
 }
 
-QRectF DisplayWidget::destRect() const
+void DisplayWidget::initialize(QRhiCommandBuffer *)
 {
-    const qreal w = width(), h = height();
-    constexpr qreal aspect = (qreal)MSXSESSION_FB_WIDTH / MSXSESSION_FB_HEIGHT;
-    qreal dw, dh;
-
-    if (w / h > aspect) {
-        dh = h;
-        dw = h * aspect;
-    } else {
-        dw = w;
-        dh = w / aspect;
+    if (m_rhi != rhi()) {
+        releaseResources();
+        m_rhi = rhi();
     }
-    return QRectF((w - dw) / 2.0, (h - dh) / 2.0, dw, dh);
-}
-
-void DisplayWidget::paintGL()
-{
-    uint64_t serial = m_serial;
-
-    if (msxsession_copy_frame(m_session, m_frame.data(), &serial)) {
-        m_serial = serial;
-        /* 0x00RRGGBB from the core; Format_RGB32 needs 0xFFRRGGBB, or KWin
-         * composites the zero alpha as see-through, so force alpha on. */
-        for (auto &px : m_frame)
-            px |= 0xFF000000u;
-    }
-
-    QPainter p(this);
-    p.fillRect(rect(), Qt::black);
-    /* A view over the packed buffer: rows are MSXSESSION_FB_WIDTH pixels
-     * apart, always -- no per-frame geometry to track. */
-    const QImage frame((const uchar *)m_frame.data(), MSXSESSION_FB_WIDTH,
-                       MSXSESSION_FB_HEIGHT, MSXSESSION_FB_WIDTH * 4,
-                       QImage::Format_RGB32);
-    p.drawImage(destRect(), frame);
-}
-
-bool DisplayWidget::event(QEvent *event)
-{
-    /* Claim every key except the reserved chords (F10 menu, F11 fullscreen,
-     * F12 debugger) while focused, so menu accelerators cannot shadow what
-     * the MSX should receive. Alt in particular must NOT reach the menu
-     * bar: it is a real key on an MSX keyboard. */
-    if (event->type() == QEvent::ShortcutOverride) {
-        QKeyEvent *ke = static_cast<QKeyEvent *>(event);
-        if (ke->key() != Qt::Key_F10 && ke->key() != Qt::Key_F11 &&
-            ke->key() != Qt::Key_F12) {
-            event->accept();
-            return true;
-        }
-    }
-    return QOpenGLWidget::event(event);
-}
-
-void DisplayWidget::forwardKey(const QKeyEvent *event, int down)
-{
-    const bool ctrl = event->modifiers().testFlag(Qt::ControlModifier);
-    const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
-    quint32 unicode = 0;
-    if (!event->text().isEmpty())
-        unicode = event->text().at(0).unicode();
-
-    quint32 keysym = keysymForKey(event);
-    if (keysym == 0) {
-        /* Printable: Qt gives no text for a Ctrl combo, so fall back to the
-         * unshifted letter, which is what the keysym contract wants. */
-        if (ctrl && event->key() >= Qt::Key_A && event->key() <= Qt::Key_Z)
-            keysym = 'a' + (quint32)(event->key() - Qt::Key_A);
-        else
-            keysym = unicode;
-    }
-    if (keysym == 0)
+    if (m_pipeline)
         return;
 
-    msxsession_key(m_session, down, keysym, unicode, ctrl ? 1 : 0,
-                  shift ? 1 : 0);
+    m_ubuf.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 16));
+    m_ubuf->create();
+    m_sampler.reset(m_rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear,
+                                      QRhiSampler::None, QRhiSampler::ClampToEdge,
+                                      QRhiSampler::ClampToEdge));
+    m_sampler->create();
+    m_tex.reset(m_rhi->newTexture(QRhiTexture::BGRA8,
+                                  QSize(MSXSESSION_FB_WIDTH, MSXSESSION_FB_HEIGHT)));
+    m_tex->create();
+    /* A new texture is empty. A still picture publishes nothing more, so
+     * re-upload what we already hold (after a lost device or an RHI change
+     * the old texture's content is gone). */
+    if (m_have)
+        m_dirty = true;
+
+    m_srb.reset(m_rhi->newShaderResourceBindings());
+    m_srb->setBindings({
+        QRhiShaderResourceBinding::uniformBuffer(0, QRhiShaderResourceBinding::VertexStage, m_ubuf.get()),
+        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
+                                                  m_tex.get(), m_sampler.get()),
+    });
+    m_srb->create();
+
+    m_pipeline.reset(m_rhi->newGraphicsPipeline());
+    m_pipeline->setTopology(QRhiGraphicsPipeline::TriangleStrip);
+    m_pipeline->setShaderStages({
+        { QRhiShaderStage::Vertex, loadShader(":/shaders/display.vert.qsb") },
+        { QRhiShaderStage::Fragment, loadShader(":/shaders/display.frag.qsb") },
+    });
+    m_pipeline->setVertexInputLayout({});
+    m_pipeline->setShaderResourceBindings(m_srb.get());
+    m_pipeline->setRenderPassDescriptor(renderTarget()->renderPassDescriptor());
+    if (!m_pipeline->create()) {
+        m_pipeline.reset();
+        emit renderFailed();
+    }
 }
 
-void DisplayWidget::keyPressEvent(QKeyEvent *event)
+void DisplayWidget::render(QRhiCommandBuffer *cb)
 {
-    if (event->isAutoRepeat()) {
-        /* openMSX's Keyboard holds a key down until it is released, and the
-         * MSX BIOS does its own auto-repeat. A host repeat storm would just
-         * be redundant press events on an already-held key. */
-        event->accept();
+    if (!m_pipeline)
         return;
-    }
-    forwardKey(event, 1);
-    event->accept();
-}
+    QRhiResourceUpdateBatch *u = m_rhi->nextResourceUpdateBatch();
 
-void DisplayWidget::keyReleaseEvent(QKeyEvent *event)
-{
-    if (event->isAutoRepeat()) {
-        event->accept();
-        return;
+    if (m_dirty && m_have) {
+        QRhiTextureSubresourceUploadDescription sub;
+        const qsizetype bytes = (qsizetype)MSXSESSION_FB_WIDTH * MSXSESSION_FB_HEIGHT * 4;
+        sub.setData(QByteArray::fromRawData(reinterpret_cast<const char *>(m_frame.data()), bytes));
+        sub.setDataStride(MSXSESSION_FB_WIDTH * 4);
+        sub.setSourceSize(QSize(MSXSESSION_FB_WIDTH, MSXSESSION_FB_HEIGHT));
+        u->uploadTexture(m_tex.get(), QRhiTextureUploadDescription({ QRhiTextureUploadEntry(0, 0, sub) }));
+        m_dirty = false;
     }
-    forwardKey(event, 0);
-    event->accept();
+
+    const QSize px = renderTarget()->pixelSize();
+    const QRectF r = displayRect(QSizeF(px));
+
+    /* pixel rect -> clip space (y up), then through the backend's correction
+     * so Vulkan's flipped y comes out the right way up */
+    auto clip = [&](double x, double y) {
+        return m_rhi->clipSpaceCorrMatrix() *
+               QVector4D(float(x / px.width() * 2.0 - 1.0), float(1.0 - y / px.height() * 2.0), 0.f, 1.f);
+    };
+    const QVector4D tl = clip(r.left(), r.top());
+    const QVector4D br = clip(r.right(), r.bottom());
+    const float rect[4] = { tl.x(), tl.y(), br.x(), br.y() };
+    u->updateDynamicBuffer(m_ubuf.get(), 0, sizeof rect, rect);
+
+    cb->beginPass(renderTarget(), Qt::black, { 1.0f, 0 }, u);
+    cb->setGraphicsPipeline(m_pipeline.get());
+    cb->setViewport(QRhiViewport(0, 0, px.width(), px.height()));
+    cb->setShaderResources(m_srb.get());
+    cb->draw(4);
+    cb->endPass();
 }
