@@ -37,8 +37,13 @@ find_package(Git QUIET)
 set(OPENMSX_COMMIT "b23ff675d75cc0c3401b469a518f668a0e7a823b")
 set(OPENMSX_URL "https://github.com/FujiNetWIFI/openMSX")
 
-set(FUJINET_COMMIT "bc2aca35922d708486f85b2216fca35cd9b524b6")
-set(FUJINET_URL "https://github.com/FujiNetWIFI/fujinet-firmware")
+# fujinet-firmware, fork branch boip-idle-wait-on-msx-rom-type (181714128):
+# the previous pin (bc2aca359, rs232-msx-rom-type) plus the BoIP idle-wait
+# fix, fujinet-firmware PR #2247 (idle wakeups ~1000/s -> ~100/s). TEMPORARY:
+# the pin returns to master when #2247 merges. The commit lives only on the
+# fork, hence the tschak909 URL.
+set(FUJINET_COMMIT "1817141289f2f6ca5d3e1ad7bda2e1897f430f2a")
+set(FUJINET_URL "https://github.com/tschak909/fujinet-firmware")
 
 # msx_provide_dependency(NAME <n> PATH <p> SENTINEL <file> OVERRIDE <VAR>
 #                        RESULT <out> URL <u> COMMIT <sha>)

@@ -343,7 +343,9 @@ modules:
         url: https://github.com/FujiNetWIFI/openMSX
         commit: b23ff675d75cc0c3401b469a518f668a0e7a823b
         dest: third_party/openmsx
+      # fujinet-firmware: bc2aca359 plus the BoIP idle-wait fix (PR #2247), on
+      # the fork. Temporary: moves back to master when #2247 merges.
       - type: git
-        url: https://github.com/FujiNetWIFI/fujinet-firmware
-        commit: bc2aca35922d708486f85b2216fca35cd9b524b6
+        url: https://github.com/tschak909/fujinet-firmware
+        commit: 1817141289f2f6ca5d3e1ad7bda2e1897f430f2a
         dest: third_party/fujinet-firmware
