@@ -21,21 +21,26 @@ on:
 
 jobs:
   build-and-test:
+    # An Arch container, not ubuntu-latest: the frontends need Qt >= 6.7
+    # (QRhiWidget, the GPU display) and GTK >= 4.16, and ubuntu-latest (24.04)
+    # ships Qt 6.4 and GTK 4.14. A frontend whose toolkit is too old is
+    # skipped by CMake, so on the old image this job would go green having
+    # built nothing. The release packages are built on ubuntu-26.04
+    # (release.yml), which has what they need and dpkg-deb.
     runs-on: ubuntu-latest
+    container: archlinux:latest
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install build tools, openMSX's own dependencies, and frontend toolkits
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential cmake ninja-build python3 pkg-config git \
-            tcl-dev libsdl2-dev libsdl2-ttf-dev libpng-dev libogg-dev \
-            libvorbis-dev libtheora-dev libglew-dev zlib1g-dev \
-            libfreetype-dev libgl-dev libasound2-dev \
-            libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
-            qt6-base-dev libqt6opengl6-dev qt6-webengine-dev \
+          pacman -Syu --noconfirm --needed \
+            base-devel cmake ninja python pkgconf git \
+            tcl sdl2-compat sdl2_ttf libpng libogg libvorbis libtheora glew \
+            zlib freetype2 libglvnd alsa-lib \
+            gtk4 libadwaita webkitgtk-6.0 \
+            qt6-base qt6-shadertools qt6-webengine \
             desktop-file-utils appstream
+
+      - uses: actions/checkout@v4
 
       - name: Configure
         run: cmake -B build -G Ninja

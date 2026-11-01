@@ -65,7 +65,11 @@ jobs:
       fail-fast: false
       matrix:
         frontend: [gnome, kde]
-    runs-on: ubuntu-latest
+    # ubuntu-26.04, not ubuntu-latest: the frontends need Qt >= 6.7 and
+    # GTK >= 4.16 (26.04 has Qt 6.10 and GTK 4.22; 24.04 has 6.4 and 4.14, and
+    # CMake would refuse the frontend named below). The .deb/.rpm therefore
+    # need a distro at least that new.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v4
 
@@ -81,8 +85,10 @@ jobs:
             libvorbis-dev libtheora-dev libglew-dev zlib1g-dev \
             libfreetype-dev libgl-dev libasound2-dev \
             libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
-            qt6-base-dev libqt6opengl6-dev qt6-webengine-dev \
-            desktop-file-utils appstream dpkg-dev rpm
+            qt6-base-dev qt6-base-private-dev qt6-shadertools-dev \
+            libqt6opengl6-dev qt6-webengine-dev \
+            desktop-file-utils appstream dpkg-dev rpm \
+            python3-venv libssl-dev file
 
       - name: Configure
         run: |
