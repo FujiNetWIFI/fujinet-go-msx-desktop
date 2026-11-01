@@ -37,7 +37,7 @@ target_link_libraries(fujinet-go-msx-kde PRIVATE
   msxsession Qt6::Widgets Qt6::GuiPrivate)
 # The display's shaders, baked for every backend and embedded as resources.
 qt_add_shaders(fujinet-go-msx-kde "display_shaders"
-  PREFIX "/shaders"
+  PREFIX "/"
   FILES shaders/display.vert shaders/display.frag)
 target_include_directories(fujinet-go-msx-kde PRIVATE
                            "${CMAKE_CURRENT_SOURCE_DIR}")
