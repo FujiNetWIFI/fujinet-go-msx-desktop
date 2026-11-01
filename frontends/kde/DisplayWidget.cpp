@@ -120,8 +120,13 @@ void DisplayWidget::paintGL()
 {
     uint64_t serial = m_serial;
 
-    if (msxsession_copy_frame(m_session, m_frame.data(), &serial))
+    if (msxsession_copy_frame(m_session, m_frame.data(), &serial)) {
         m_serial = serial;
+        /* 0x00RRGGBB from the core; Format_RGB32 needs 0xFFRRGGBB, or KWin
+         * composites the zero alpha as see-through, so force alpha on. */
+        for (auto &px : m_frame)
+            px |= 0xFF000000u;
+    }
 
     QPainter p(this);
     p.fillRect(rect(), Qt::black);

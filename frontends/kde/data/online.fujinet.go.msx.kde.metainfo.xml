@@ -50,6 +50,13 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.1" date="2026-11-01">
+      <description>
+        <p>
+          Fixed: the video area was see-through under KWin (Plasma). It is now opaque.
+        </p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-10-29">
       <description>
         <p>

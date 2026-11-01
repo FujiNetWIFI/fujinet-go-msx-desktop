@@ -50,6 +50,13 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.4.1" date="2026-11-01">
+      <description>
+        <p>
+          No GNOME changes; version kept in step with the KDE build, which fixes a see-through video area under KWin.
+        </p>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-10-29">
       <description>
         <p>
