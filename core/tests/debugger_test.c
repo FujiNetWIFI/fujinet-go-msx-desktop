@@ -172,6 +172,10 @@ int main(void)
         for (k = 0; k < sizeof(prog); k++) msxdebug_write(d, (uint16_t)(0xC000 + k), prog[k]);
         msxdebug_cpu_set(d, MSX_REG_SP, 0xF000);
         msxdebug_cpu_set(d, MSX_REG_PC, 0xC000);
+        /* a VDP interrupt can be pending on a slow runner: with IFF1 set the
+         * first step would take it instead of the DI */
+        msxdebug_cpu_set(d, MSX_REG_IFF1, 0);
+        msxdebug_cpu_set(d, MSX_REG_IFF2, 0);
         msxdebug_step(d);                       /* DI */
         msxdebug_step_over(d);                  /* CALL: over it */
         CHECK(wait_stopped(d, 4000), "step over never stopped");

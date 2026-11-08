@@ -26,7 +26,7 @@ static const char *const platform_names[] = { "GNOME", "KDE", "Windows", "macOS"
 /* What the frontends' Help buttons and menus open. */
 static const char *const contexts[] = {
     "main", "fujilog", "prefs/FujiNet", "prefs/Connection",
-    "debugger/console", "debugger/cpu", "debugger/disassembly", "debugger/breakpoints",
+    "debugger/console", "debugger/cpu", "debugger/disassembly", "debugger/vdp",
     "debugger/breakpoints", "debugger/io", "debugger/fujinet",
 };
 
