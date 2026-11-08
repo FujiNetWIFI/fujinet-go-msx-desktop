@@ -160,9 +160,37 @@ int main(void)
         CHECK(!msxdebug_breakpoint_check(d, bp_addr), "remove did not remove");
     }
 
-    /* 5. the frame stops at the VDP interrupt vector; step over and step
+    /* 6. a conditional memory watchpoint: C-BIOS writes the system RAM
+     * (JIFFY, the interrupt's tick counter, at $FC9E) every frame. */
+    {
+        msxdebug_breakpoint list[8];
+        char err[160], why[128];
+        int id, id2, n, i;
+        id = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9F, "", err, sizeof(err));
+        CHECK(id >= 0, "watchpoint add failed: %s", err);
+        id2 = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9E, "{bad", err, sizeof(err));
+        CHECK(id2 < 0 && err[0], "a brace in a condition was accepted");
+        id2 = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9E, "[[", err, sizeof(err));
+        CHECK(id2 < 0 && err[0], "a bad condition was accepted");
+        printf("debugger_test: a bad condition is refused: %s\n", err);
+        msxdebug_resume(d);
+        CHECK(wait_stopped(d, 4000), "write watchpoint never fired");
+        msxdebug_stop_reason(d, why, sizeof(why), NULL);
+        CHECK(strstr(why, "watchpoint") != NULL, "reason \"%s\" does not name the watchpoint", why);
+        n = msxdebug_breakpoint_list(d, list, 8);
+        for (i = 0; i < n; i++)
+            if (list[i].id == id) CHECK(list[i].hits >= 1, "watchpoint has no hits");
+        printf("debugger_test: %s\n", why);
+        msxdebug_breakpoint_clear(d);
+        CHECK(msxdebug_breakpoint_list(d, list, 8) == 0, "clear left breakpoints");
+    }
+
+    /* 6b. the frame stops at the VDP interrupt vector; step over and step
      * out are tried on a small program in RAM (interrupts off): DI,
-     * CALL $C008, NOP, ... $C008: RET. */
+     * CALL $C008, NOP, ... $C008: RET. This runs after the watchpoint above
+     * on purpose: that stop is inside the BIOS's interrupt, so page 3 is RAM
+     * by then (right after attach, on a slow runner, the BIOS has not set its
+     * slots up and the poke at $C000 would not stick). */
     {
         static const uint8_t prog[] = { 0xF3, 0xCD, 0x08, 0xC0, 0x00, 0x00, 0x00, 0x00, 0xC9 };
         msxdebug_cpu c;
@@ -200,31 +228,6 @@ int main(void)
         CHECK(c.pc == 0x0038, "frame stopped at $%04X, want the interrupt vector $0038", c.pc);
         CHECK(strcmp(why, "frame") == 0, "frame reason \"%s\"", why);
         printf("debugger_test: frame stopped at $%04X (%s)\n", c.pc, why);
-    }
-
-    /* 6. a conditional memory watchpoint: C-BIOS writes the system RAM
-     * (JIFFY, the interrupt's tick counter, at $FC9E) every frame. */
-    {
-        msxdebug_breakpoint list[8];
-        char err[160], why[128];
-        int id, id2, n, i;
-        id = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9F, "", err, sizeof(err));
-        CHECK(id >= 0, "watchpoint add failed: %s", err);
-        id2 = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9E, "{bad", err, sizeof(err));
-        CHECK(id2 < 0 && err[0], "a brace in a condition was accepted");
-        id2 = msxdebug_breakpoint_add(d, MSXDEBUG_BP_WRITE, 0xFC9E, 0xFC9E, "[[", err, sizeof(err));
-        CHECK(id2 < 0 && err[0], "a bad condition was accepted");
-        printf("debugger_test: a bad condition is refused: %s\n", err);
-        msxdebug_resume(d);
-        CHECK(wait_stopped(d, 4000), "write watchpoint never fired");
-        msxdebug_stop_reason(d, why, sizeof(why), NULL);
-        CHECK(strstr(why, "watchpoint") != NULL, "reason \"%s\" does not name the watchpoint", why);
-        n = msxdebug_breakpoint_list(d, list, 8);
-        for (i = 0; i < n; i++)
-            if (list[i].id == id) CHECK(list[i].hits >= 1, "watchpoint has no hits");
-        printf("debugger_test: %s\n", why);
-        msxdebug_breakpoint_clear(d);
-        CHECK(msxdebug_breakpoint_list(d, list, 8) == 0, "clear left breakpoints");
     }
 
     /* 7. the console: an alias, a label, and a Tcl pass-through. */
