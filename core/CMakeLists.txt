@@ -35,12 +35,29 @@ else()
   set(MSX_SDL2_LINK_LIB "")
 endif()
 
+# The Help, embedded: data/help/help.md as topics of styled spans
+# (core/include/msxhelp.h), which every frontend lays out with its own
+# toolkit. help_data.h declares the table; the build generates it.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(MSX_HELP_C "${CMAKE_BINARY_DIR}/generated/help_content.c")
+add_custom_command(
+  OUTPUT "${MSX_HELP_C}"
+  COMMAND "${Python3_EXECUTABLE}" -I "${CMAKE_SOURCE_DIR}/tools/help/make-help.py"
+          --src "${CMAKE_SOURCE_DIR}/data/help/help.md"
+          --out-c "${MSX_HELP_C}"
+  DEPENDS "${CMAKE_SOURCE_DIR}/tools/help/make-help.py"
+          "${CMAKE_SOURCE_DIR}/data/help/help.md"
+  COMMENT "Help"
+  VERBATIM)
+
 add_library(msxsession STATIC
   src/session.c
   src/paths.c
   src/settings.c
   src/input_map.c
   src/fujinet_runtime.c
+  src/help.c
+  "${MSX_HELP_C}"
   openmsx/msx_host.cc
   debugger/z80dasm.c
   debugger/symbols.c
@@ -195,6 +212,12 @@ add_executable(debugger_test tests/debugger_test.c)
 target_link_libraries(debugger_test PRIVATE msxsession Threads::Threads)
 add_test(NAME debugger_test COMMAND debugger_test)
 set_tests_properties(debugger_test PROPERTIES TIMEOUT 60)
+
+# The built-in Help covers every setting, key and context. It never touches
+# the emulator, so it needs no machine.
+add_executable(help_test tests/help_test.c)
+target_link_libraries(help_test PRIVATE msxsession)
+add_test(NAME help COMMAND help_test)
 
 # M6 gate: the VDP snapshot/decode path against a real running boot --
 # mode decode, a VRAM poke round-tripping through the snapshot, and the

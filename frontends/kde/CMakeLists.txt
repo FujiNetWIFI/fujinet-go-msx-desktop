@@ -30,6 +30,7 @@ add_executable(fujinet-go-msx-kde
   FrameFeed.cpp
   KeyForward.cpp
   FujiNetWindows.cpp
+  help/HelpWindow.cpp
   debugger/DebuggerWindow.cpp
 )
 

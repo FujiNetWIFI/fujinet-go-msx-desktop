@@ -18,6 +18,7 @@ set(GNOME_SOURCES
   main.c
   window.c
   prefs.c
+  help/help_window.c
   display.c
   debugger/dbg_window.c
 )

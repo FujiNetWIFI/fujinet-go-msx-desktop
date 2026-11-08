@@ -25,6 +25,7 @@
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #import "DisplayView.h"
+#import "help/HelpWindow.h"
 #import "debugger/DebuggerWindow.h"
 
 #include <stdlib.h>
@@ -161,7 +162,7 @@ static NSInteger machineIndex(const char *machineId)
     _logWindow.title = @"FujiNet Console Log";
     _logWindow.releasedWhenClosed = NO;
 
-    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:frame];
+    NSScrollView *scroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 36, frame.size.width, frame.size.height - 36)];
     scroll.hasVerticalScroller = YES;
     scroll.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     _logView = [[NSTextView alloc] initWithFrame:frame];
@@ -169,7 +170,17 @@ static NSInteger machineIndex(const char *machineId)
     _logView.font = [NSFont monospacedSystemFontOfSize:11
                                                 weight:NSFontWeightRegular];
     scroll.documentView = _logView;
-    _logWindow.contentView = scroll;
+    {
+        /* the log over a strip with the Help button */
+        NSView *box = [[NSView alloc] initWithFrame:frame];
+        NSButton *help = MsxHelpButton(@"fujilog");
+        [help setFrameOrigin:NSMakePoint(10, 6)];
+        help.autoresizingMask = NSViewMaxXMargin | NSViewMaxYMargin;
+        [box addSubview:scroll];
+        [box addSubview:help];
+        _logWindow.contentView = box;
+    }
+    MsxSetHelpContext(_logWindow, @"fujilog");
 
     _logTimer = [NSTimer
         scheduledTimerWithTimeInterval:1.0
@@ -315,7 +326,16 @@ static NSInteger machineIndex(const char *machineId)
     _settingsWindow.title = @"FujiNet Preferences";
     _settingsWindow.releasedWhenClosed = NO;
     _settingsWindow.delegate = self;
-    _settingsWindow.contentView = root;
+    {
+        /* the settings over a strip with the Help button */
+        NSButton *helpBtn = MsxHelpButton(@"prefs/FujiNet");
+        NSStackView *wrap = [NSStackView stackViewWithViews:@[root, helpBtn]];
+        wrap.orientation = NSUserInterfaceLayoutOrientationVertical;
+        wrap.alignment = NSLayoutAttributeLeading;
+        wrap.edgeInsets = NSEdgeInsetsMake(0, 16, 12, 16);
+        _settingsWindow.contentView = wrap;
+        MsxSetHelpContext(_settingsWindow, @"prefs/FujiNet");
+    }
     [_settingsWindow center];
     [_settingsWindow makeKeyAndOrderFront:nil];
 }
@@ -470,7 +490,24 @@ static NSInteger machineIndex(const char *machineId)
     [menubar addItem:windowItem];
     NSApp.windowsMenu = windowMenu;
 
+    NSMenuItem *helpItem = [[NSMenuItem alloc] init];
+    NSMenu *help = [[NSMenu alloc] initWithTitle:@"Help"];
+    /* openHelp:, not showHelp: (AppKit's: "Help isn't available") */
+    [help addItem:[self item:@"FujiNet Go MSX Help" action:@selector(openHelp:) key:@"?"]];
+    helpItem.submenu = help;
+    [menubar addItem:helpItem];
+
     NSApp.mainMenu = menubar;
+    NSApp.helpMenu = help;
+    /* the Help menu's search field finds the Help's sections too */
+    [NSApp registerUserInterfaceItemSearchHandler:[MsxHelpWindow shared]];
+}
+
+/* For the window in front: Settings, the debugger's tab ... */
+- (void)openHelp:(id)sender
+{
+    (void)sender;
+    [[MsxHelpWindow shared] showFor:[NSApp keyWindow]];
 }
 
 /* ---- lifecycle --------------------------------------------------------------- */

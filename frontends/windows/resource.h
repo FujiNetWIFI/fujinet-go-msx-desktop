@@ -19,6 +19,7 @@
 #define IDM_ABOUT          208
 #define IDM_EXIT           209
 #define IDM_FUJINET_CONN   210
+#define IDM_HELP           211
 
 #define IDM_MACHINE_BASE   300
 #define IDM_RADIO_SPAN     8  /* headroom over the 3 current entries */

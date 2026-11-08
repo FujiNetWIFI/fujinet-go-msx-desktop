@@ -24,4 +24,8 @@ void msx_window_restart_session(MsxWindow *self);
  * one running out of the build tree. */
 const char *msx_icon_name(void);
 
+/* The Help context the main window shows now: "main", or "prefs/FujiNet"
+ * while the FujiNet Preferences are open. */
+const char *msx_window_help_context(MsxWindow *self);
+
 G_END_DECLS

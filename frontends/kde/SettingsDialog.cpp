@@ -7,6 +7,7 @@
  */
 
 #include "SettingsDialog.h"
+#include "help/HelpWindow.h"
 
 #include <QCheckBox>
 #include <QDialogButtonBox>
@@ -15,6 +16,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QShortcut>
 #include <QVBoxLayout>
 
 SettingsDialog::SettingsDialog(msxsession *session, QWidget *parent)
@@ -46,8 +48,13 @@ SettingsDialog::SettingsDialog(msxsession *session, QWidget *parent)
     hint->setWordWrap(true);
     fujinetForm->addRow(hint);
 
+    /* Help, F1 and Ctrl+Shift+H (the app's shortcuts don't reach a modal dialog) */
+    setProperty("msxHelpContext", QStringLiteral("prefs/FujiNet"));
     auto *buttons = new QDialogButtonBox(
-        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel | QDialogButtonBox::Help, this);
+    connect(buttons, &QDialogButtonBox::helpRequested, this, [this] { msxHelpFor(this); });
+    for (const char *key : { "F1", "Ctrl+Shift+H" })
+        new QShortcut(QKeySequence(QString::fromLatin1(key)), this, [this] { msxHelpFor(this); });
     connect(buttons, &QDialogButtonBox::accepted, this, &SettingsDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &SettingsDialog::reject);
 

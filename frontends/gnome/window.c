@@ -22,6 +22,7 @@
  */
 
 #include "window.h"
+#include "help/help_window.h"
 
 #include <string.h>
 
@@ -68,6 +69,26 @@ static gboolean forward_key(MsxWindow *self, guint keyval,
     return TRUE;
 }
 
+/* The Help context the main window shows now: "main", or "prefs/FujiNet"
+ * while the FujiNet Preferences are open. */
+const char *msx_window_help_context(MsxWindow *self)
+{
+    AdwDialog *d = adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(self));
+    return d && ADW_IS_PREFERENCES_DIALOG(d) ? "prefs/FujiNet" : "main";
+}
+
+/* app.help: every window's Ctrl+Shift+H, for what it shows. Not a cast of
+ * the active window: it can be the debugger or the log. */
+static void action_help(GSimpleAction *a, GVariant *p, gpointer user_data)
+{
+    (void)a; (void)p;
+    msx_help_for(gtk_application_get_active_window(GTK_APPLICATION(user_data)));
+}
+
+static const GActionEntry app_actions[] = {
+    { "help", action_help, NULL, NULL, NULL, { 0 } },
+};
+
 static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval,
                                guint keycode, GdkModifierType state,
                                gpointer user_data)
@@ -75,6 +96,14 @@ static gboolean on_key_pressed(GtkEventControllerKey *controller, guint keyval,
     MsxWindow *self = MSX_WINDOW(user_data);
     (void)controller;
     (void)keycode;
+
+    /* F1 is an MSX function key in the window itself, and Help while
+     * Preferences or another dialog is open */
+    if (keyval == GDK_KEY_F1 && adw_application_window_get_visible_dialog(ADW_APPLICATION_WINDOW(self)) &&
+        !(state & GDK_MODIFIER_MASK & ~GDK_LOCK_MASK)) {
+        msx_help_for(GTK_WINDOW(self));
+        return TRUE;
+    }
 
     switch (keyval) {
     case GDK_KEY_F11:
@@ -272,6 +301,16 @@ static void log_destroyed(GtkWidget *w, gpointer data)
     log_win = NULL;
 }
 
+static gboolean log_on_key(GtkEventControllerKey *c, guint keyval, guint code,
+                           GdkModifierType st, gpointer ud)
+{
+    (void)c; (void)code; (void)st;
+    if (keyval != GDK_KEY_F1)
+        return FALSE;
+    msx_help_for(ud);
+    return TRUE;
+}
+
 static void action_fujinet_log(GSimpleAction *action, GVariant *param,
                                gpointer user_data)
 {
@@ -305,6 +344,15 @@ static void action_fujinet_log(GSimpleAction *action, GVariant *param,
     scroll = gtk_scrolled_window_new();
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroll), lw->view);
     gtk_window_set_child(GTK_WINDOW(lw->window), scroll);
+    {
+        GtkWidget *header = adw_header_bar_new();
+        GtkEventController *keys = gtk_event_controller_key_new();
+        adw_header_bar_pack_end(ADW_HEADER_BAR(header), msx_help_button("fujilog"));
+        gtk_window_set_titlebar(GTK_WINDOW(lw->window), header);
+        msx_help_set_context(GTK_WINDOW(lw->window), "fujilog");
+        g_signal_connect(keys, "key-pressed", G_CALLBACK(log_on_key), lw->window);
+        gtk_widget_add_controller(lw->window, keys);
+    }
     lw->adj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scroll));
     g_signal_connect(lw->adj, "changed", G_CALLBACK(log_adj_changed), lw);
     g_signal_connect(lw->window, "destroy", G_CALLBACK(log_destroyed), lw);
@@ -400,6 +448,7 @@ static GMenu *build_menu(msxsession *session)
     g_menu_append_section(menu, "FujiNet", G_MENU_MODEL(fujinet));
 
     g_menu_append(tail, "Debugger (F12)", "win.debugger");
+    g_menu_append(tail, "FujiNet Go MSX Help", "app.help");
     g_menu_append(tail, "About FujiNet Go MSX", "win.about");
     g_menu_append_section(menu, NULL, G_MENU_MODEL(tail));
 
@@ -431,6 +480,13 @@ GtkWidget *msx_window_new(AdwApplication *app, msxsession *session)
 
     g_action_map_add_action_entries(G_ACTION_MAP(self), win_actions,
                                     G_N_ELEMENTS(win_actions), self);
+    if (!g_action_map_lookup_action(G_ACTION_MAP(app), "help"))
+        g_action_map_add_action_entries(G_ACTION_MAP(app), app_actions,
+                                        G_N_ELEMENTS(app_actions), app);
+    {
+        static const char *const help_accels[] = { "<Control><Shift>h", NULL };
+        gtk_application_set_accels_for_action(GTK_APPLICATION(app), "app.help", help_accels);
+    }
 
     machine_action = g_simple_action_new_stateful(
         "machine", G_VARIANT_TYPE_INT32,

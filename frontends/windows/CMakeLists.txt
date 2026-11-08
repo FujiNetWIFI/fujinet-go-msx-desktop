@@ -18,6 +18,7 @@ add_executable(fujinet-go-msx-windows WIN32
   main.c
   display.c
   debugger/dbg_window.c
+  help/help_window.c
   resource.rc
 )
 target_link_libraries(fujinet-go-msx-windows PRIVATE

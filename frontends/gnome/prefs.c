@@ -11,6 +11,7 @@
 #include "prefs.h"
 
 #include "window.h"
+#include "help/help_window.h"
 
 #define EXTERNAL_PLACEHOLDER "127.0.0.1:65505"
 
@@ -81,7 +82,9 @@ void msx_prefs_show(MsxWindow *parent, msxsession *session)
     state->window = parent;
     state->session = session;
 
+    adw_preferences_page_set_name(page, "FujiNet");
     adw_preferences_group_set_title(fujinet, "FujiNet");
+    adw_preferences_group_set_header_suffix(fujinet, msx_help_button("prefs/FujiNet"));
     adw_preferences_group_set_description(
         fujinet,
         "Skip the built-in FujiNet and connect to another instance that is "

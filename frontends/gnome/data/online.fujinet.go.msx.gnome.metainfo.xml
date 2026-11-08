@@ -18,7 +18,8 @@
       cartridge device on loopback TCP. The debugger understands all three
       video chips this family of machines shipped with -- the MSX1 TMS9918A
       and the MSX2/MSX2+ V9938/V9958 -- including their register sets,
-      command engine, and palette RAM.
+      command engine, and palette RAM. Built-in, searchable Help covers all of
+      it.
     </p>
   </description>
   <launchable type="desktop-id">online.fujinet.go.msx.gnome.desktop</launchable>

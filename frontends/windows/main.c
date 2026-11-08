@@ -44,6 +44,7 @@
 #include "msxsession.h"
 #include "debugger/dbg_window.h"
 #include "display.h"
+#include "help/help_window.h"
 #include "resource.h"
 
 static msxsession *g_session;
@@ -268,6 +269,9 @@ static void show_fujinet_config(void)
 /* ---- console log window -------------------------------------------------------- */
 
 #define LOG_TIMER_ID 1
+#define LOG_BAR 34
+#define IDC_LOG_HELP 310
+static HWND g_log_help;
 
 /* The log starts at its end and follows it while the reader is there; once
  * they scroll up it stays where they left it, and an unchanged log is not
@@ -322,8 +326,12 @@ static LRESULT CALLBACK log_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
     case WM_SIZE:
-        MoveWindow(g_log_edit, 0, 0, LOWORD(lp), HIWORD(lp), TRUE);
+        MoveWindow(g_log_edit, 0, LOG_BAR, LOWORD(lp), HIWORD(lp) > LOG_BAR ? HIWORD(lp) - LOG_BAR : 0, TRUE);
+        if (g_log_help) MoveWindow(g_log_help, LOWORD(lp) - 84, 4, 76, LOG_BAR - 8, TRUE);
         return 0;
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDC_LOG_HELP) { msx_help_for(hwnd); return 0; }
+        break;
     case WM_TIMER:
         refresh_log();
         return 0;
@@ -332,6 +340,7 @@ static LRESULT CALLBACK log_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         DestroyWindow(hwnd);
         g_log_window = NULL;
         g_log_edit = NULL;
+        g_log_help = NULL;
         return 0;
     }
     return DefWindowProcA(hwnd, msg, wp, lp);
@@ -370,6 +379,15 @@ static void show_fujinet_log(HINSTANCE inst)
         0, 0, 0, 0, g_log_window, NULL, inst, NULL);
     SendMessageA(g_log_edit, WM_SETFONT, (WPARAM)GetStockObject(ANSI_FIXED_FONT),
                 TRUE);
+    g_log_help = CreateWindowExA(0, "BUTTON", "Help", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 10, 10,
+                                 g_log_window, (HMENU)(INT_PTR)IDC_LOG_HELP, inst, NULL);
+    SendMessageA(g_log_help, WM_SETFONT, (WPARAM)GetStockObject(DEFAULT_GUI_FONT), TRUE);
+    msx_help_set_context(g_log_window, "fujilog", 1);
+    {
+        RECT crc;
+        GetClientRect(g_log_window, &crc);
+        SendMessageA(g_log_window, WM_SIZE, 0, MAKELPARAM(crc.right, crc.bottom));
+    }
     g_log_have_shown = 0;
     refresh_log();
     SetTimer(g_log_window, LOG_TIMER_ID, 1000, NULL);
@@ -382,6 +400,7 @@ static void show_fujinet_log(HINSTANCE inst)
 #define IDC_CONN_ADDR     302
 #define IDC_CONN_OK       303
 #define IDC_CONN_CANCEL   304
+#define IDC_CONN_HELP     305
 #ifndef EM_SETCUEBANNER
 #define EM_SETCUEBANNER 0x1501
 #endif
@@ -470,6 +489,9 @@ static LRESULT CALLBACK conn_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_CONN_CANCEL:
             conn_close(hwnd);
             return 0;
+        case IDC_CONN_HELP:
+            msx_help_for(hwnd);
+            return 0;
         }
         break;
     case WM_CLOSE:
@@ -529,6 +551,8 @@ static void show_fujinet_connection(HINSTANCE inst)
                "that is already running. Use its [BOIP] listen port (65505 "
                "by default).",
                0, 16, 82, 420, 64, 0);
+    conn_child(win, "BUTTON", "Help", BS_PUSHBUTTON | WS_TABSTOP, 16, 166, 80, 26, IDC_CONN_HELP);
+    msx_help_set_context(win, "prefs/Connection", 1);
     conn_child(win, "BUTTON", "OK", BS_DEFPUSHBUTTON | WS_TABSTOP, 270, 166,
                80, 26, IDC_CONN_OK);
     conn_child(win, "BUTTON", "Cancel", BS_PUSHBUTTON | WS_TABSTOP, 356, 166,
@@ -617,6 +641,8 @@ static HMENU build_menu(void)
     AppendMenuA(view, MF_STRING, IDM_DEBUGGER, "Debugger\tF12");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)view, "&View");
 
+    AppendMenuA(help, MF_STRING, IDM_HELP, "FujiNet Go MSX &Help\tCtrl+Shift+H");
+    AppendMenuA(help, MF_SEPARATOR, 0, NULL);
     AppendMenuA(help, MF_STRING, IDM_ABOUT, "About FujiNet Go MSX");
     AppendMenuA(bar, MF_POPUP, (UINT_PTR)help, "&Help");
     return bar;
@@ -677,6 +703,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             break;
         case IDM_FULLSCREEN: toggle_fullscreen(hwnd); break;
         case IDM_DEBUGGER:   open_debugger(); break;
+        case IDM_HELP: msx_help_for(hwnd); break;
         case IDM_ABOUT:
             {
                 char about[256];
@@ -743,6 +770,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
                              800, 640, NULL, g_menu, inst, NULL);
     if (!g_hwnd)
         return 1;
+    /* F1 is an MSX function key in the window itself */
+    msx_help_set_context(g_hwnd, "main", 0);
     g_display = msx_display_create(g_hwnd, g_session);
     layout_display();
     ShowWindow(g_hwnd, show);
@@ -757,6 +786,8 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
         /* The debugger's F5/F7/F8/Shift+F8 accelerators get first refusal
          * while its window (or one of its fields) has the focus. */
         if (msx_debugger_pretranslate(&msg))
+            continue;
+        if (msx_help_pretranslate(&msg))
             continue;
         TranslateMessage(&msg);
         DispatchMessageA(&msg);

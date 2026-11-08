@@ -56,6 +56,14 @@ platforms are very welcome.
 - Settings/Preferences windows (GNOME, KDE, macOS ⌘,, Windows) for machine
   profile, aspect ratio, smooth scaling, and FujiNet enable.
 
+### Built-in Help
+
+**Help ▸ FujiNet Go MSX Help** (Ctrl+Shift+H, ⌘? on a Mac) opens a searchable
+Help, and the Help buttons in the FujiNet settings, the debugger and the console
+log open the topic for what they show. The text is
+[data/help/help.md](data/help/help.md), which GitHub shows as it is; the build
+embeds it and every frontend lays it out natively.
+
 ### Developer debugger (F12)
 
 F12 toggles it. Opening it stops the machine and closing it lets the machine

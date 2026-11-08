@@ -25,6 +25,7 @@
 #include "DisplayWidget.h"
 #include "SoftDisplayWidget.h"
 #include "FujiNetWindows.h"
+#include "help/HelpWindow.h"
 #include "SettingsDialog.h"
 #include "debugger/DebuggerWindow.h"
 
@@ -45,6 +46,7 @@ MainWindow::MainWindow(msxsession *session, QWidget *parent)
     : QMainWindow(parent), m_session(session)
 {
     setWindowTitle(QStringLiteral("FujiNet Go MSX"));
+    setProperty("msxHelpContext", QStringLiteral("main"));
     resize(960, 780);
 
     auto *gpu = new DisplayWidget(session, this);
@@ -182,6 +184,18 @@ void MainWindow::buildMenus()
                     this, &MainWindow::showDebugger);
 
     QMenu *help = menuBar()->addMenu(QStringLiteral("&Help"));
+    {
+        /* works from every window of the app (the Debugger has the keyboard
+         * too) */
+        QAction *helpAct = help->addAction(QStringLiteral("FujiNet Go MSX &Help"));
+        helpAct->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_H));
+        helpAct->setShortcutContext(Qt::ApplicationShortcut);
+        addAction(helpAct);
+        connect(helpAct, &QAction::triggered, this, [this] {
+            msxHelpFor(QApplication::activeWindow() ? QApplication::activeWindow() : this);
+        });
+    }
+    help->addSeparator();
     help->addAction(QStringLiteral("&About"), this, [this] {
         QMessageBox::about(
             this, QStringLiteral("FujiNet Go MSX"),
