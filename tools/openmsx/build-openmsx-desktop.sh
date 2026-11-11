@@ -85,7 +85,8 @@ esac
 # than relying on whatever the outer shell happened to inherit; gated to
 # mingw-w64 only, since OSTYPE is a real, meaningful value on every other
 # platform this script runs on and must not be overwritten there.
-[[ "${TARGET_OS}" == "mingw-w64" ]] && export OSTYPE=msys
+# Only on a real MSYS2 shell: a MinGW cross build from Linux (CI) has no sh.exe and no MSYS mounts.
+[[ "${TARGET_OS}" == "mingw-w64" && "$(uname -o 2>/dev/null)" == Msys ]] && export OSTYPE=msys
 
 JOBS="${OPENMSX_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
@@ -216,6 +217,10 @@ find "${STAGE_DIR}/${DERIVED_DIR}/obj" -name '*.o' ! -name 'main.o' -print0 \
 echo "    archived ${OBJ_COUNT} openMSX objects -> lib/libopenmsx.a"
 
 if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
+    # (pkg-config-*/ is the bundled build tool's own glib: a host tool, not part of the
+    # emulator, and in the arm64 build on an Intel host it is not even the same architecture.)
+    # (*.dll.a are DLL import libraries: a cross build makes one beside GLEW's static archive,
+    # and merging both defines glewInit twice.)
     # Merge every 3rd-party static archive's objects directly into
     # libopenmsx.a itself, rather than copying them alongside it as
     # separate .a files for cmake/OpenMSXRuntime.cmake to discover with a
@@ -255,7 +260,7 @@ if [[ "${NEED_3RDPARTY}" -eq 1 ]]; then
             [[ -e "${obj}" ]] || continue
             mv "${obj}" "${extract_dir}/${lib_count}_$(basename "${obj}")"
         done
-    done < <(find "${STAGE_DIR}/${DERIVED_DIR}/3rdparty" -name '*.a' -print0)
+    done < <(find "${STAGE_DIR}/${DERIVED_DIR}/3rdparty" -name '*.a' ! -name '*.dll.a' ! -path '*/pkg-config-*/*' -print0)
     if [[ "${lib_count}" -gt 0 ]]; then
         find "${merge_dir}" -name '*.o' -print0 \
             | xargs -0 "${AR}" rcs "${WORK_OUT}/lib/libopenmsx.a"

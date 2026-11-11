@@ -1,11 +1,25 @@
 name: Release
 
-# M9: cutting a release. Triggered by a `v*` tag, builds every artifact this
-# repository publishes -- Linux packages for both frontends (.deb/.rpm/
-# .tar.gz via CPack), both flatpak single-file bundles, a zipped macOS app
-# bundle and a Windows portable zip + NSIS installer -- and attaches them to
-# a draft GitHub Release. Same shape as the sibling fujinet-go-coco-desktop/
-# fujinet-go-adam-desktop/fujinet-go-apple2-desktop repos' release process.
+# Cutting a release, entirely on the org's self-hosted runners (Linux jobs in
+# containers on TMA-3, macOS on the Tahoe runner; Windows is cross-built with
+# MinGW and tested under Wine). Triggered by a `v*` tag, builds every artifact this
+# repository publishes -- Linux packages for both frontends (.deb/.rpm/.tar.gz
+# via CPack), both flatpak single-file bundles, a zipped universal
+# (arm64 + x86_64) macOS app bundle, and a Windows (x86-64) portable
+# zip plus NSIS installer -- and attaches them to a draft GitHub Release.
+#
+# Run by hand (workflow_dispatch) it is a dry run: every artifact is built,
+# tested and uploaded to the run, the version is the tree's own, and no
+# release is created -- so the whole pipeline can be proven green without
+# pushing a tag.
+#
+# What is and is not proven, so a red run can be read correctly:
+#   linux, flatpak   run locally and in CI; a failure is a regression.
+#   windows          built and tested natively on every push (windows.yml);
+#                    new here: the static SDL3, the import-table check, NSIS.
+#   macos            compiled only on CI (macos.yml), never on the
+#                    development machine. A failure here is real signal about
+#                    frontends/macos, not necessarily the workflow.
 #
 # The version is declared in the tree, not derived from the tag, so a
 # downloaded build's About box can never disagree with the download it came
@@ -35,22 +49,44 @@ permissions:
 
 jobs:
   check-version:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fujinet-builder]
+    container:
+      image: ubuntu:24.04
+      options: --add-host=host.docker.internal:host-gateway
     outputs:
       version: ${{ steps.v.outputs.version }}
     steps:
+      - name: Install base tools
+        shell: bash
+        run: |
+          MIRROR=http://mirrors.edge.kernel.org/ubuntu
+          (echo > /dev/tcp/host.docker.internal/3142) 2>/dev/null \
+            && MIRROR=http://host.docker.internal:3142/mirrors.edge.kernel.org/ubuntu
+          sed -i "s|http://[a-z.]*ubuntu.com/ubuntu|$MIRROR|" /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+
       - uses: actions/checkout@v4
       - name: Tag, CMakeLists.txt and both metainfo files must all agree
         id: v
         run: |
-          tag="${GITHUB_REF#refs/tags/v}"
-          echo "tag version: $tag"
           cmake_version=$(sed -n 's/^project([^)]*VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt)
           echo "CMakeLists.txt version: $cmake_version"
-          if [ "$tag" != "$cmake_version" ]; then
-            echo "::error::tag v$tag does not match CMakeLists.txt's project() VERSION $cmake_version"
-            exit 1
-          fi
+          case "$GITHUB_REF" in
+            refs/tags/v*)
+              tag="${GITHUB_REF#refs/tags/v}"
+              echo "tag version: $tag"
+              if [ "$tag" != "$cmake_version" ]; then
+                echo "::error::tag v$tag does not match CMakeLists.txt's project() VERSION $cmake_version"
+                exit 1
+              fi
+              ;;
+            *)
+              # a dispatched dry run: the tree's own version, no release at the end
+              echo "not a tag ($GITHUB_REF): dry run of $cmake_version"
+              tag="$cmake_version"
+              ;;
+          esac
           for m in frontends/gnome/data/*.metainfo.xml frontends/kde/data/*.metainfo.xml; do
             if ! grep -q "<release version=\"$tag\"" "$m"; then
               echo "::error::$m has no <release version=\"$tag\"> entry"
@@ -69,26 +105,55 @@ jobs:
     # GTK >= 4.16 (26.04 has Qt 6.10 and GTK 4.22; 24.04 has 6.4 and 4.14, and
     # CMake would refuse the frontend named below). The .deb/.rpm therefore
     # need a distro at least that new.
-    runs-on: ubuntu-26.04
+    runs-on: [self-hosted, Linux, X64, fujinet-builder]
+    container:
+      image: ubuntu:26.04
+      options: --add-host=host.docker.internal:host-gateway
     steps:
-      - uses: actions/checkout@v4
-
       # Same package list as linux.yml, plus dpkg-dev/rpm for CPack's DEB
-      # and RPM generators (ubuntu-latest has dpkg-deb already; rpmbuild
-      # does not ship by default).
-      - name: Install build tools, openMSX's own dependencies, and frontend toolkits
+      # and RPM generators.
+      - name: Install build tools and frontend toolkits
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          MIRROR=http://mirrors.edge.kernel.org/ubuntu
+          (echo > /dev/tcp/host.docker.internal/3142) 2>/dev/null \
+            && MIRROR=http://host.docker.internal:3142/mirrors.edge.kernel.org/ubuntu
+          sed -i "s|http://[a-z.]*ubuntu.com/ubuntu|$MIRROR|" /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl \
+            qt6-webengine-dev \
             build-essential cmake ninja-build python3 pkg-config git \
             tcl-dev libsdl2-dev libsdl2-ttf-dev libpng-dev libogg-dev \
             libvorbis-dev libtheora-dev libglew-dev zlib1g-dev \
             libfreetype-dev libgl-dev libasound2-dev \
             libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
             qt6-base-dev qt6-base-private-dev qt6-shadertools-dev \
-            libqt6opengl6-dev qt6-webengine-dev \
-            desktop-file-utils appstream dpkg-dev rpm \
-            python3-venv libssl-dev file
+            libqt6opengl6-dev \
+            desktop-file-utils appstream \
+            libx11-dev libxext-dev libxrandr-dev libxi-dev libxss-dev \
+            libxcursor-dev libxkbcommon-dev libwayland-dev libdrm-dev \
+            libgbm-dev libgl1-mesa-dev libpulse-dev libasound2-dev \
+            libxtst-dev dpkg-dev rpm python3-venv libssl-dev file
+
+      - uses: actions/checkout@v4
+
+      - name: Mark the workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Statically linked (unlike linux.yml's push-CI job, which links the
+      # packaged shared SDL3 for speed), so the shipped .deb/.rpm/.tar.gz
+      # have no libSDL3.so runtime dependency -- same reasoning as the
+      # release-grade SDL3 build the windows-package/macos-package jobs use.
+      - name: Build and install static SDL3 (release-3.4.12, pinned)
+        run: |
+          git clone --depth 1 --branch release-3.4.12 \
+            https://github.com/libsdl-org/SDL.git /tmp/sdl3-src
+          cmake -S /tmp/sdl3-src -B /tmp/sdl3-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/tmp/sdl3-install \
+            -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST_LIBRARY=OFF
+          cmake --build /tmp/sdl3-build
+          cmake --install /tmp/sdl3-build
 
       - name: Configure
         run: |
@@ -124,16 +189,25 @@ jobs:
         manifest:
           - build-aux/flatpak/online.fujinet.go.msx.gnome.yml
           - build-aux/flatpak/online.fujinet.go.msx.kde.yml
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64, fujinet-builder]
+    container:
+      image: ubuntu:24.04
+      options: --privileged --add-host=host.docker.internal:host-gateway
     steps:
-      - uses: actions/checkout@v4
-
+      # --privileged: flatpak-builder's bubblewrap sandbox needs user namespaces.
       - name: Install flatpak and flatpak-builder
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          MIRROR=http://mirrors.edge.kernel.org/ubuntu
+          (echo > /dev/tcp/host.docker.internal/3142) 2>/dev/null \
+            && MIRROR=http://host.docker.internal:3142/mirrors.edge.kernel.org/ubuntu
+          sed -i "s|http://[a-z.]*ubuntu.com/ubuntu|$MIRROR|" /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl flatpak flatpak-builder elfutils unzip xz-utils
           flatpak remote-add --if-not-exists --user flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - uses: actions/checkout@v4
 
       - name: Install the runtime and SDK this manifest targets
         run: |
@@ -143,19 +217,6 @@ jobs:
           flatpak install -y --user flathub \
             "${runtime}/x86_64/${runtime_version}" \
             "${sdk}/x86_64/${runtime_version}"
-
-      # The same no-op eu-strip stub flatpak.yml needs (see that workflow's
-      # own header comment for the full diagnosis): flatpak-builder's own
-      # debuginfo-extraction pass cannot get past eu-strip on this runner's
-      # sandboxing. /usr/local/bin already precedes elfutils' /usr/bin on
-      # PATH on ubuntu-latest.
-      - name: Work around eu-strip failing under this runner's sandboxing
-        run: |
-          sudo tee /usr/local/bin/eu-strip > /dev/null <<'EOF'
-          #!/bin/sh
-          exit 0
-          EOF
-          sudo chmod +x /usr/local/bin/eu-strip
 
       - name: Build and export to a local repo
         run: |
@@ -175,13 +236,38 @@ jobs:
           path: '*.flatpak'
           if-no-files-found: error
 
+  # Cross-built with MinGW-w64 in an ubuntu:24.04 container and tested under
+  # Wine (there is no Windows runner); .github/workflows/mingw-deps.sh builds
+  # the pinned static dependencies, SDL3 included, so the shipped exe has no
+  # loose SDL3.dll dependency.
   windows-package:
     needs: check-version
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
+    runs-on: [self-hosted, Linux, X64, fujinet-builder]
+    container:
+      image: ubuntu:24.04
+      options: --add-host=host.docker.internal:host-gateway
+    env:
+      WINEPREFIX: /tmp/wine
+      WINEDEBUG: -all
     steps:
+      - name: Install build tools, MinGW-w64, Wine and NSIS
+        shell: bash
+        run: |
+          MIRROR=http://mirrors.edge.kernel.org/ubuntu
+          (echo > /dev/tcp/host.docker.internal/3142) 2>/dev/null \
+            && MIRROR=http://host.docker.internal:3142/mirrors.edge.kernel.org/ubuntu
+          sed -i "s|http://[a-z.]*ubuntu.com/ubuntu|$MIRROR|" /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update
+          apt-get install -y --no-install-recommends git curl ca-certificates \
+            build-essential make python3 python3-pip python3-venv python3-jinja2 \
+            python3-yaml cmake ninja-build pkg-config mingw-w64 wine wine64 \
+            xz-utils bzip2 perl nsis autoconf automake libtool nasm pkgconf tcl
+          # openMSX's makefile uses the plain x86_64-w64-mingw32-gcc/g++ names, which Ubuntu
+          # points at the win32-threads variants; the app and libraries use the posix ones
+          for tool in gcc g++; do
+            update-alternatives --set x86_64-w64-mingw32-$tool /usr/bin/x86_64-w64-mingw32-$tool-posix
+          done
+
       - uses: actions/checkout@v4
         with:
           # See windows.yml's own comment: autocrlf would rewrite every
@@ -190,61 +276,47 @@ jobs:
           # cmake/StageOpenMSX.cmake's re-stage detection is not expecting.
           fetch-depth: 1
 
-      - uses: msys2/setup-msys2@v2
+      - name: Mark the workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Cache MinGW dependencies
+        id: mingw-cache
+        uses: actions/cache@v4
         with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            git
-            make
-            autoconf
-            automake
-            libtool
-            nasm
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-python
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-nsis
+          path: ${{ runner.temp }}/mingw
+          key: mingw-deps-${{ hashFiles('.github/workflows/mingw-deps.sh') }}
+
+      - name: Build MinGW dependencies
+        if: steps.mingw-cache.outputs.cache-hit != 'true'
+        run: .github/workflows/mingw-deps.sh "$RUNNER_TEMP/mingw"
 
       - name: Configure
-        run: cmake -B build -G Ninja
+        run: |
+          P="$RUNNER_TEMP/mingw"
+          echo "MBEDTLS_ROOT_DIR=$P" >> "$GITHUB_ENV"
+          echo "FUJINET_CMAKE_ARGS=-DCMAKE_TOOLCHAIN_FILE=$P/toolchain.cmake -DCMAKE_PREFIX_PATH=$P -DCMAKE_CROSSCOMPILING_EMULATOR=wine -DCMAKE_C_FLAGS=-Wno-error=stringop-truncation -DCMAKE_CXX_FLAGS=-Wno-error=conversion-null" >> "$GITHUB_ENV"
+          # openMSX's static SDL2 needs Windows' own libraries too
+          LIBS="-L$P/lib -static -lws2_32 -lcrypt32 -lbcrypt -luuid -lole32 -lgdi32 -luser32 -limm32 -lwinmm -lversion -lsetupapi -loleaut32 -lshell32 -ladvapi32"
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$P/toolchain.cmake" \
+            -DCMAKE_PREFIX_PATH="$P" \
+            -DCMAKE_CROSSCOMPILING_EMULATOR=wine \
+            "-DCMAKE_C_STANDARD_LIBRARIES=$LIBS" "-DCMAKE_CXX_STANDARD_LIBRARIES=$LIBS"
 
       - name: Build
         run: cmake --build build
 
-      # See windows.yml's own comment for why this is needed: windows-latest
-      # runners have no GPU, and Windows' own OpenGL software fallback is
-      # 1.1 only, well short of what openMSX's renderer needs. This job is
-      # a separate workflow file from windows.yml and does not inherit its
-      # steps, so it needs its own copy of this fix -- confirmed missing by
-      # a real release.yml run on the v0.1.0 tag hitting the exact same
-      # "Need at least OpenGL version openGL 2.1" failure; this job's own
-      # test binaries live in build/core, same as windows.yml's.
-      - name: Install Mesa (software OpenGL for the ctest binaries)
-        uses: f3d-app/install-mesa-windows-action@v1
-        with:
-          path: ${{ github.workspace }}/build/core
-
+      # These seven tests start openMSX's renderer through SDL, which needs a video
+      # driver and an OpenGL context; there is no display under headless Wine. The
+      # other five run.
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure
+        run: ctest --output-on-failure -E '^(debugger_test|vdp_test|boot_smoke|fujinet_smoke|machine_switch_test|rpc_test|external_smoke)$'
 
-      # Both binaries in the artifact must depend only on system DLLs and
-      # the runtime's own copies (never MSYS's) -- the FujiNet DLL or the
-      # frontend shipping an MSYS import (e.g. libcrypto/zlib1) would launch
-      # fine here but LoadLibrary-fail on a clean Windows box, same trap
-      # fujinet-go-coco-desktop's own check exists to catch. ldd resolves
-      # against this machine's PATH, where the MSYS copies exist, so the
-      # import table is checked instead -- that reports a dependency as
-      # satisfied that the target will not have. openMSX's own 3rdparty
-      # chain (Tcl/SDL2/SDL2_ttf/freetype/libpng/zlib/ogg/vorbis/theora/
-      # GLEW) is statically archived into libopenmsx.a for this target (see
-      # cmake/OpenMSXRuntime.cmake's NEED_3RDPARTY path), so none of that
-      # shows up as a DLL dependency here -- only opengl32 (the one thing
-      # that chain cannot avoid linking dynamically) joins the sibling
-      # repos' own system-DLL whitelist.
+      # Both binaries in the artifact must depend only on system DLLs; the
+      # FujiNet DLL shipping a MinGW or OpenSSL import (libcrypto, zlib1,
+      # libwinpthread) would launch fine under Wine but LoadLibrary-fail on a
+      # clean Windows box. The import table is what is checked.
       - name: Verify the shipped binaries are self-contained
         run: |
           fail=0
@@ -253,7 +325,7 @@ jobs:
           for f in "$EXE" "$DLL"; do
             test -f "$f" || { echo "::error::$f not built"; exit 1; }
             echo "--- $f imports ---"
-            imports=$(objdump -p "$f" | sed -n 's/^\s*DLL Name: //p' | sort -u)
+            imports=$(x86_64-w64-mingw32-objdump -p "$f" | sed -n 's/^\s*DLL Name: //p' | sort -u)
             echo "$imports"
             bad=$(echo "$imports" | grep -ivE \
               '^(api-ms-win-[a-z0-9el-]+|kernel32|user32|gdi32|advapi32|shell32|ole32|oleaut32|comctl32|comdlg32|imm32|winmm|version|setupapi|dwmapi|ws2_32|iphlpapi|bcrypt|crypt32|secur32|netapi32|userenv|dbghelp|shlwapi|msvcrt|ucrtbase|rpcrt4|winspool|uxtheme|hid|cfgmgr32|powrprof|avrt|dxgi|d3d11|opengl32|glu32)\.dll$' \
@@ -264,11 +336,6 @@ jobs:
               fail=1
             fi
           done
-          deps=$(ldd "$EXE" 2>/dev/null || true)
-          if echo "$deps" | grep -iE "/ucrt64|/mingw|/msys"; then
-            echo "::error::MSYS/MinGW runtime DLL leaked into the exe"
-            fail=1
-          fi
           exit $fail
 
       # The portable artifact is the folder you copy and run: the exe,
@@ -297,13 +364,17 @@ jobs:
           path: dist/FujiNet-Go-MSX
           if-no-files-found: error
 
+      # Ubuntu's makensis is the stock x86-unicode build with nsDialogs in
+      # its default plugin directory, so the welcome and finish pages work
+      # without any plugin-path juggling.
       - name: Build the installer
         run: |
+          makensis -VERSION
           makensis -V2 \
             -DVERSION="${{ needs.check-version.outputs.version }}" \
-            -DSRCDIR="$(cygpath -w "$PWD/dist/FujiNet-Go-MSX")" \
-            -DOUTFILE="$(cygpath -w "$PWD/dist/FujiNet-Go-MSX-Setup.exe")" \
-            -DAPPICON="$(cygpath -w "$PWD/frontends/windows/app.ico")" \
+            -DSRCDIR="$PWD/dist/FujiNet-Go-MSX" \
+            -DOUTFILE="$PWD/dist/FujiNet-Go-MSX-Setup.exe" \
+            -DAPPICON="$PWD/frontends/windows/app.ico" \
             build-aux/windows/installer.nsi
           test -f dist/FujiNet-Go-MSX-Setup.exe \
             || { echo "::error::installer not produced"; exit 1; }
@@ -314,9 +385,17 @@ jobs:
           path: dist/FujiNet-Go-MSX-Setup.exe
           if-no-files-found: error
 
+  # One UNIVERSAL (arm64 + x86_64) bundle, built on the org's self-hosted
+  # Tahoe runner (an Intel VM with no Homebrew). The arm64 slice is built and
+  # checked but cannot run here; the tests exercise the x86_64 slice. Signed
+  # and notarised when the credentials are configured.
   macos-package:
     needs: check-version
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, X64, tahoe]
+    env:
+      CMAKE_OSX_ARCHITECTURES: "arm64;x86_64"
+      CFLAGS: -Wno-error=unused-command-line-argument
+      CXXFLAGS: -Wno-error=unused-command-line-argument
     steps:
       - uses: actions/checkout@v4
 
@@ -324,33 +403,113 @@ jobs:
       # -- openMSX supplies its own static 3rd-party chain for this target
       # (see this workflow's own header comment).
       - name: Install build tools
-        run: brew install cmake ninja python3 pkg-config autoconf automake libtool
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet "cmake>=3.28,<4" ninja
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+
+      - name: Select the macOS SDK
+        run: echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+
+      - name: Cache universal OpenSSL
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openssl-universal
+          key: openssl-universal-3.5.0-${{ runner.os }}
+
+      - name: Build universal static OpenSSL (3.5.0, pinned commit)
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          COMMIT=636dfadc70ce26f2473870570bfd9ec352806b1d # openssl-3.5.0
+          SRC="$RUNNER_TEMP/openssl-src"
+          rm -rf "$SRC" && git init -q "$SRC"
+          git -C "$SRC" fetch -q --depth 1 https://github.com/openssl/openssl.git "$COMMIT"
+          git -C "$SRC" checkout -q FETCH_HEAD
+          test "$(git -C "$SRC" rev-parse HEAD)" = "$COMMIT"
+          DEST="$RUNNER_TEMP/openssl-universal"
+          for arch in arm64 x86_64; do
+            rm -rf "$RUNNER_TEMP/openssl-$arch"
+            cp -R "$SRC" "$RUNNER_TEMP/openssl-$arch"
+            (cd "$RUNNER_TEMP/openssl-$arch" &&
+             ./Configure darwin64-$arch-cc no-shared no-tests \
+               --prefix="$RUNNER_TEMP/openssl-$arch-inst" --libdir=lib &&
+             make -j"$(sysctl -n hw.ncpu)" build_libs &&
+             make install_dev)
+          done
+          mkdir -p "$DEST/lib"
+          cp -R "$RUNNER_TEMP/openssl-x86_64-inst/include" "$DEST/include"
+          for lib in libcrypto.a libssl.a; do
+            lipo -create "$RUNNER_TEMP/openssl-arm64-inst/lib/$lib" \
+                         "$RUNNER_TEMP/openssl-x86_64-inst/lib/$lib" \
+                 -output "$DEST/lib/$lib"
+          done
+
+      - name: Point the FujiNet build at the universal OpenSSL
+        run: echo "OPENSSL_ROOT_DIR=$RUNNER_TEMP/openssl-universal" >> "$GITHUB_ENV"
+
+      # Static, so the shipped .app has no non-system library dependency.
+      - name: Build and install static SDL3 (release-3.4.12, pinned)
+        run: |
+          rm -rf sdl3-src
+          git clone --depth 1 --branch release-3.4.12 \
+            https://github.com/libsdl-org/SDL.git sdl3-src
+          cmake -S sdl3-src -B sdl3-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+            -DSDL_TEST_LIBRARY=OFF -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdl3"
+          cmake --build sdl3-src/build
+          cmake --install sdl3-src/build
+          echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/sdl3" >> "$GITHUB_ENV"
 
       - name: Configure
-        run: cmake -B build -G Ninja
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_OSX_ARCHITECTURES=x86_64
 
       - name: Build
         run: cmake --build build
 
+      # These seven tests start openMSX's renderer through SDL, which needs a video
+      # driver; the Tahoe VMs have no window-server session ("The video driver did
+      # not add any displays"). The other five run.
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure
+        run: ctest --output-on-failure -E '^(debugger_test|vdp_test|boot_smoke|fujinet_smoke|machine_switch_test|rpc_test|external_smoke)$'
 
-      - name: Verify the bundle is self-contained
+      # The app is built for x86_64 above and tested; this builds the arm64 half
+      # (openMSX with its own static third-party chain, cross-compiled; it cannot run
+      # on this Intel runner) and merges it into the same bundle. The x86_64 work
+      # directories are moved aside so the arm64 build starts clean.
+      - name: Add the arm64 slices
+        env:
+          ARM64_PRE: mv tools/openmsx/work tools/openmsx/work-x86_64; mv core/openmsx-generated/derived core/openmsx-generated/derived-x86_64
+          ARM64_ENV: OPENMSX_TARGET_CPU=aarch64
+          # openMSX names the CPU aarch64; the compiler wants -arch arm64
+          CFLAGS: -arch arm64 -Wno-error=unused-command-line-argument
+          CXXFLAGS: -arch arm64 -Wno-error=unused-command-line-argument
+          LDFLAGS: -arch arm64
+        run: |
+          .github/workflows/macos-add-arm64.sh "frontends/macos/FujiNet Go MSX.app" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Verify the bundle is self-contained and universal
         run: |
           APP="build/frontends/macos/FujiNet Go MSX.app"
-          leaked=0
+          fail=0
           while IFS= read -r -d '' f; do
             if file "$f" | grep -q "Mach-O"; then
+              archs="$(lipo -archs "$f")"
+              case "$archs" in
+                *x86_64*arm64*|*arm64*x86_64*) ;;
+                *) echo "::error::$f is not universal ($archs)"; fail=1 ;;
+              esac
               if otool -L "$f" | tail -n +2 | grep -E "/opt/homebrew|/usr/local"; then
                 echo "--- $f"
                 otool -L "$f"
-                leaked=1
+                fail=1
               fi
             fi
           done < <(find "$APP" -type f -print0)
-          if [ "$leaked" -ne 0 ]; then
-            echo "::error::non-system library leaked into the app bundle"
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::bundle is not universal or links a non-system library"
             exit 1
           fi
           test -f "$APP/Contents/Frameworks/libfujinet.dylib" \
@@ -418,18 +577,32 @@ jobs:
         run: |
           ditto -c -k --keepParent \
             "build/frontends/macos/FujiNet Go MSX.app" \
-            FujiNet-Go-MSX-macos.zip
+            FujiNet-Go-MSX-macos-universal.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: macos-app
-          path: FujiNet-Go-MSX-macos.zip
+          name: macos-app-universal
+          path: FujiNet-Go-MSX-macos-universal.zip
           if-no-files-found: error
 
   release:
     needs: [check-version, linux-packages, flatpaks, windows-package, macos-package]
-    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: [self-hosted, Linux, X64, fujinet-builder]
+    container:
+      image: ubuntu:24.04
+      options: --add-host=host.docker.internal:host-gateway
     steps:
+      - name: Install base tools
+        shell: bash
+        run: |
+          MIRROR=http://mirrors.edge.kernel.org/ubuntu
+          (echo > /dev/tcp/host.docker.internal/3142) 2>/dev/null \
+            && MIRROR=http://host.docker.internal:3142/mirrors.edge.kernel.org/ubuntu
+          sed -i "s|http://[a-z.]*ubuntu.com/ubuntu|$MIRROR|" /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates gh zip
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -449,8 +622,10 @@ jobs:
            && zip -qr "$OLDPWD/release/fujinet-go-msx-${tag}-windows.zip" .)
           cp "artifacts/windows-installer/FujiNet-Go-MSX-Setup.exe" \
              "release/fujinet-go-msx-${tag}-windows-setup.exe"
-          cp "artifacts/macos-app/FujiNet-Go-MSX-macos.zip" \
-             "release/fujinet-go-msx-${tag}-macos.zip"
+          for zip in artifacts/macos-app-*/FujiNet-Go-MSX-macos-*.zip; do
+            arch="${zip##*-macos-}"; arch="${arch%.zip}"
+            cp "$zip" "release/fujinet-go-msx-${tag}-macos-${arch}.zip"
+          done
           ls -l release
 
       - name: Create (or update) the draft release and upload assets

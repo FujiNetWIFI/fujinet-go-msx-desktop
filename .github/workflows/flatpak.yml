@@ -56,16 +56,26 @@ jobs:
         manifest:
           - build-aux/flatpak/online.fujinet.go.msx.gnome.yml
           - build-aux/flatpak/online.fujinet.go.msx.kde.yml
-    runs-on: ubuntu-latest
+    # Self-hosted, in a container. --privileged: flatpak-builder's bubblewrap
+    # sandbox needs user namespaces, which the default container profile blocks.
+    runs-on: [self-hosted, Linux, X64, fujinet-builder]
+    container:
+      image: ubuntu:24.04
+      options: --privileged --add-host=host.docker.internal:host-gateway
     steps:
-      - uses: actions/checkout@v4
-
       - name: Install flatpak and flatpak-builder
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y flatpak flatpak-builder
+          MIRROR=http://mirrors.edge.kernel.org/ubuntu
+          (echo > /dev/tcp/host.docker.internal/3142) 2>/dev/null \
+            && MIRROR=http://host.docker.internal:3142/mirrors.edge.kernel.org/ubuntu
+          sed -i "s|http://[a-z.]*ubuntu.com/ubuntu|$MIRROR|" /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates curl flatpak flatpak-builder elfutils unzip xz-utils
           flatpak remote-add --if-not-exists --user flathub \
             https://dl.flathub.org/repo/flathub.flatpakrepo
+
+      - uses: actions/checkout@v4
 
       - name: Install the runtime and SDK this manifest targets
         run: |
@@ -75,18 +85,6 @@ jobs:
           flatpak install -y --user flathub \
             "${runtime}/x86_64/${runtime_version}" \
             "${sdk}/x86_64/${runtime_version}"
-
-      # See this workflow's own header comment: a genuine no-op standing in
-      # for elfutils' eu-strip, which flatpak-builder's own debuginfo-
-      # extraction pass cannot get past on this runner. /usr/local/bin
-      # already precedes elfutils' /usr/bin on PATH on ubuntu-latest.
-      - name: Work around eu-strip failing under this runner's sandboxing
-        run: |
-          sudo tee /usr/local/bin/eu-strip > /dev/null <<'EOF'
-          #!/bin/sh
-          exit 0
-          EOF
-          sudo chmod +x /usr/local/bin/eu-strip
 
       # No --install: building is the check. (Installing would also work,
       # but there is nothing here to run it against on a headless runner.)

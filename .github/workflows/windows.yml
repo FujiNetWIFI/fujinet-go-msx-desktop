@@ -1,34 +1,20 @@
 name: Windows
 
-# Third of the M7 CI jobs (see TODO). Native MSYS2/UCRT64, matching how
-# tools/fujinet/build-fujinet-desktop.sh and tools/openmsx/build-openmsx-
-# desktop.sh already expect to be run (their cygpath/bash-by-name handling
-# is written for an MSYS2 shell). cmake/toolchains/mingw-w64.cmake exists
-# for cross-compiling the session/frontend code from Linux when no Windows
-# box is available for that; this workflow is the real thing once it runs
-# on a windows-latest runner.
+# Cross-built with MinGW-w64 on the org's self-hosted Linux runners (inside an
+# ubuntu:24.04 container) and tested under Wine: the core, the session layer,
+# the FujiNet runtime, the test suite and the Win32 frontend. There is no
+# Windows runner; this is the same approach fujinet-firmware's CI uses.
 #
-# Iterated extensively against real windows-latest CI runs (no Windows
-# machine in this development environment, so every fix along the way --
-# tools/openmsx/patches/patch-staged-tree.py's later patches,
-# tools/openmsx/build-openmsx-desktop.sh's ar/PKG_CONFIG_PATH handling,
-# cmake/OpenMSXRuntime.cmake's Windows system-library block,
-# core/src/paths.c's config/data-dir fallback -- was root-caused from a
-# real CI failure, never guessed blind). OPENMSX_TARGET_OS=mingw-w64
-# triggers the same NEED_3RDPARTY static-build chain as darwin
-# (cmake/OpenMSXRuntime.cmake, tools/openmsx/build-openmsx-desktop.sh).
+# .github/workflows/mingw-deps.sh builds the static dependencies (zlib, expat,
+# MbedTLS, OpenSSL, SDL3) with pinned checksums and writes the CMake toolchain
+# file, cached on the script's hash.
 #
-# The Mesa step below addresses the last gap found this way: openMSX's
-# renderer needs a real OpenGL 2.1+ context, but windows-latest runners
-# have no GPU and Windows' own software fallback (the ancient Microsoft
-# GDI Generic implementation) is OpenGL 1.1 only -- confirmed directly
-# from a real CI run ("renderer init failed: Need at least OpenGL version
-# openGL 2.1"). f3d-app/install-mesa-windows-action drops a real,
-# llvmpipe-backed opengl32.dll (from pal1000/mesa-dist-win, the standard
-# source for this exact well-known GitHub Actions Windows + OpenGL gap)
-# next to the ctest binaries -- Windows' own DLL search order checks an
-# executable's own directory before System32, so this shadows the
-# system's inadequate one without touching anything system-wide.
+# The FujiNet cartridge's transport (core/sms/fujitcp_host.c) is Winsock on
+# this platform (ws2_32, wired into the core CMakeLists); the core's threads
+# are winpthreads. Not exercised on real Windows, only under Wine.
+#
+#, as every published build. WITH_FUJINET is left at
+# its default ON to prove the runtime cross-builds here.
 
 on:
   push:
@@ -38,48 +24,75 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
+    runs-on: [self-hosted, Linux, X64, fujinet-builder]
+    container:
+      image: ubuntu:24.04
+      options: --add-host=host.docker.internal:host-gateway
+    env:
+      WINEPREFIX: /tmp/wine
+      WINEDEBUG: -all
     steps:
+      - name: Install build tools, MinGW-w64 and Wine
+        shell: bash
+        run: |
+          MIRROR=http://mirrors.edge.kernel.org/ubuntu
+          (echo > /dev/tcp/host.docker.internal/3142) 2>/dev/null \
+            && MIRROR=http://host.docker.internal:3142/mirrors.edge.kernel.org/ubuntu
+          sed -i "s|http://[a-z.]*ubuntu.com/ubuntu|$MIRROR|" /etc/apt/sources.list.d/ubuntu.sources
+          apt-get update
+          apt-get install -y --no-install-recommends git curl ca-certificates \
+            build-essential make python3 python3-pip python3-venv python3-jinja2 \
+            python3-yaml cmake ninja-build pkg-config mingw-w64 wine wine64 \
+            xz-utils bzip2 perl autoconf automake libtool nasm pkgconf tcl
+          # openMSX's makefile uses the plain x86_64-w64-mingw32-gcc/g++ names, which Ubuntu
+          # points at the win32-threads variants; the app and libraries use the posix ones
+          for tool in gcc g++; do
+            update-alternatives --set x86_64-w64-mingw32-$tool /usr/bin/x86_64-w64-mingw32-$tool-posix
+          done
+
       - uses: actions/checkout@v4
-        with:
-          # autocrlf would rewrite every staged/patched openMSX/FujiNet
-          # source file's line endings on checkout, which is exactly the
-          # kind of diff-shaped noise cmake/StageOpenMSX.cmake's re-stage
-          # detection (content hashing of the patch scripts) is not
-          # expecting.
-          fetch-depth: 1
 
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            git
-            make
-            autoconf
-            automake
-            libtool
-            nasm
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-python
-            mingw-w64-ucrt-x86_64-pkgconf
+      - name: Mark the workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: Cache MinGW dependencies
+        id: mingw-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/mingw
+          key: mingw-deps-${{ hashFiles('.github/workflows/mingw-deps.sh') }}
+
+      - name: Build MinGW dependencies
+        if: steps.mingw-cache.outputs.cache-hit != 'true'
+        run: .github/workflows/mingw-deps.sh "$RUNNER_TEMP/mingw"
+
+      # The runtime's own build takes its toolchain from FUJINET_CMAKE_ARGS
+      # (word-split, so no spaces inside a value). GCC rejects two things
+      # clang let through and the firmware builds with -Werror.
       - name: Configure
-        run: cmake -B build -G Ninja
+        run: |
+          P="$RUNNER_TEMP/mingw"
+          echo "MBEDTLS_ROOT_DIR=$P" >> "$GITHUB_ENV"
+          echo "FUJINET_CMAKE_ARGS=-DCMAKE_TOOLCHAIN_FILE=$P/toolchain.cmake -DCMAKE_PREFIX_PATH=$P -DCMAKE_CROSSCOMPILING_EMULATOR=wine -DCMAKE_C_FLAGS=-Wno-error=stringop-truncation -DCMAKE_CXX_FLAGS=-Wno-error=conversion-null" >> "$GITHUB_ENV"
+          # openMSX's static SDL2 needs Windows' own libraries too
+          LIBS="-L$P/lib -static -lws2_32 -lcrypt32 -lbcrypt -luuid -lole32 -lgdi32 -luser32 -limm32 -lwinmm -lversion -lsetupapi -loleaut32 -lshell32 -ladvapi32"
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$P/toolchain.cmake" \
+            -DCMAKE_PREFIX_PATH="$P" \
+            -DCMAKE_CROSSCOMPILING_EMULATOR=wine \
+            "-DCMAKE_C_STANDARD_LIBRARIES=$LIBS" "-DCMAKE_CXX_STANDARD_LIBRARIES=$LIBS"
 
       - name: Build
         run: cmake --build build
 
-      - name: Install Mesa (software OpenGL for the ctest binaries)
-        uses: f3d-app/install-mesa-windows-action@v1
-        with:
-          path: ${{ github.workspace }}/build/core
-
+      # These seven tests start openMSX's renderer through SDL, which needs a video
+      # driver and an OpenGL context; there is no display under headless Wine. The
+      # other five run.
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure
+        run: ctest --output-on-failure -E '^(debugger_test|vdp_test|boot_smoke|fujinet_smoke|machine_switch_test|rpc_test|external_smoke)$'
+
+      - name: Re-run failed tests verbosely
+        if: failure()
+        working-directory: build
+        run: ctest --rerun-failed --output-on-failure -V || true

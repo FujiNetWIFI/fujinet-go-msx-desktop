@@ -20,11 +20,18 @@ name: macOS
 # than adding speculative, unverifiable branching). This workflow existing
 # and running (green or red) on the first real push is the actual test.
 #
-# Build tools only -- no brew-installed SDL2/Tcl/etc: unlike Linux, darwin
-# gets its 3rd-party stack from openMSX's own from-source chain (see
-# above), so the only thing this needs from Homebrew is the toolchain to
-# drive that chain (autoconf/automake/libtool cover the ./configure-based
-# pieces of it).
+# One job, on the org's self-hosted Tahoe runner (an Intel VM, no Homebrew),
+# building a UNIVERSAL (arm64 + x86_64) bundle: CMAKE_OSX_ARCHITECTURES in the
+# environment reaches every nested cmake run (SDL3, mbedTLS, the FujiNet
+# runtime). OpenSSL, which FujiNet's libssh links statically, is built here
+# for both architectures and lipo'd. The arm64 slice is built and checked but
+# cannot run on this runner; the tests exercise the x86_64 slice. There is no
+# separate Intel leg any more.
+#
+#, as every published build. WITH_FUJINET is left at its
+# default ON: tools/fujinet/build-fujinet-desktop.sh has Darwin handling
+# (libfujinet.dylib, and it builds mbedTLS 3.6.5 from source because the
+# runner has no usable system copy).
 
 on:
   push:
@@ -34,19 +41,121 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-latest
+    runs-on: [self-hosted, macOS, X64, tahoe]
+    env:
+      CMAKE_OSX_ARCHITECTURES: "arm64;x86_64"
+      CFLAGS: -Wno-error=unused-command-line-argument
+      CXXFLAGS: -Wno-error=unused-command-line-argument
     steps:
       - uses: actions/checkout@v4
 
+      # No Homebrew on the runner: cmake and ninja come from PyPI wheels in a
+      # venv. cmake is held below 4 because the vendored FujiNet subprojects
+      # (libssh, libsmb2, libnfs, mbedTLS) declare pre-3.5 minimums that
+      # cmake 4 rejects.
       - name: Install build tools
-        run: brew install cmake ninja python3 pkg-config autoconf automake libtool
+        run: |
+          python3 -m venv "$RUNNER_TEMP/tools"
+          "$RUNNER_TEMP/tools/bin/pip" install --quiet "cmake>=3.28,<4" ninja
+          echo "$RUNNER_TEMP/tools/bin" >> "$GITHUB_PATH"
+
+      # Some tools (the firmware's own tests) run the compiler directly, and
+      # the Xcode toolchain's clang only finds libc++ through an SDK path.
+      - name: Select the macOS SDK
+        run: echo "SDKROOT=$(xcrun --show-sdk-path)" >> "$GITHUB_ENV"
+
+      - name: Cache universal OpenSSL
+        id: openssl-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/openssl-universal
+          key: openssl-universal-3.5.0-${{ runner.os }}
+
+      - name: Build universal static OpenSSL (3.5.0, pinned commit)
+        if: steps.openssl-cache.outputs.cache-hit != 'true'
+        run: |
+          COMMIT=636dfadc70ce26f2473870570bfd9ec352806b1d # openssl-3.5.0
+          SRC="$RUNNER_TEMP/openssl-src"
+          rm -rf "$SRC" && git init -q "$SRC"
+          git -C "$SRC" fetch -q --depth 1 https://github.com/openssl/openssl.git "$COMMIT"
+          git -C "$SRC" checkout -q FETCH_HEAD
+          test "$(git -C "$SRC" rev-parse HEAD)" = "$COMMIT"
+          DEST="$RUNNER_TEMP/openssl-universal"
+          for arch in arm64 x86_64; do
+            rm -rf "$RUNNER_TEMP/openssl-$arch"
+            cp -R "$SRC" "$RUNNER_TEMP/openssl-$arch"
+            (cd "$RUNNER_TEMP/openssl-$arch" &&
+             ./Configure darwin64-$arch-cc no-shared no-tests \
+               --prefix="$RUNNER_TEMP/openssl-$arch-inst" --libdir=lib &&
+             make -j"$(sysctl -n hw.ncpu)" build_libs &&
+             make install_dev)
+          done
+          mkdir -p "$DEST/lib"
+          cp -R "$RUNNER_TEMP/openssl-x86_64-inst/include" "$DEST/include"
+          for lib in libcrypto.a libssl.a; do
+            lipo -create "$RUNNER_TEMP/openssl-arm64-inst/lib/$lib" \
+                         "$RUNNER_TEMP/openssl-x86_64-inst/lib/$lib" \
+                 -output "$DEST/lib/$lib"
+          done
+
+      - name: Point the FujiNet build at the universal OpenSSL
+        run: echo "OPENSSL_ROOT_DIR=$RUNNER_TEMP/openssl-universal" >> "$GITHUB_ENV"
+
+      # Static, so the bundle has no non-system library dependency. Installed
+      # under RUNNER_TEMP: the runner has no passwordless sudo.
+      - name: Build and install static SDL3 (release-3.4.12, pinned)
+        run: |
+          rm -rf sdl3-src
+          git clone --depth 1 --branch release-3.4.12 \
+            https://github.com/libsdl-org/SDL.git sdl3-src
+          cmake -S sdl3-src -B sdl3-src/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DSDL_SHARED=OFF -DSDL_STATIC=ON \
+            -DSDL_TEST_LIBRARY=OFF -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/sdl3"
+          cmake --build sdl3-src/build
+          cmake --install sdl3-src/build
+          echo "CMAKE_PREFIX_PATH=$RUNNER_TEMP/sdl3" >> "$GITHUB_ENV"
 
       - name: Configure
-        run: cmake -B build -G Ninja
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_OSX_ARCHITECTURES=x86_64
 
       - name: Build
         run: cmake --build build
 
+      # These seven tests start openMSX's renderer through SDL, which needs a video
+      # driver; the Tahoe VMs have no window-server session ("The video driver did
+      # not add any displays"). The other five run.
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure
+        run: ctest --output-on-failure -E '^(debugger_test|vdp_test|boot_smoke|fujinet_smoke|machine_switch_test|rpc_test|external_smoke)$'
+
+      # The app is built for x86_64 above and tested; this builds the arm64 half
+      # (openMSX with its own static third-party chain, cross-compiled; it cannot run
+      # on this Intel runner) and merges it into the same bundle. The x86_64 work
+      # directories are moved aside so the arm64 build starts clean.
+      - name: Add the arm64 slices
+        env:
+          ARM64_PRE: mv tools/openmsx/work tools/openmsx/work-x86_64; mv core/openmsx-generated/derived core/openmsx-generated/derived-x86_64
+          ARM64_ENV: OPENMSX_TARGET_CPU=aarch64
+          # openMSX names the CPU aarch64; the compiler wants -arch arm64
+          CFLAGS: -arch arm64 -Wno-error=unused-command-line-argument
+          CXXFLAGS: -arch arm64 -Wno-error=unused-command-line-argument
+          LDFLAGS: -arch arm64
+        run: |
+          .github/workflows/macos-add-arm64.sh "frontends/macos/FujiNet Go MSX.app" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      # A crash on a Mac we cannot sit at is only diagnosable with a
+      # backtrace: re-run every failing test under lldb and print it.
+      - name: Backtraces for failed tests
+        if: failure()
+        working-directory: build
+        run: |
+          xcodebuild -version | head -1; uname -a
+          for t in $(ctest -N | sed -n 's/^ *Test *#[0-9]*: *//p'); do
+            exe=$(ctest -V -R "^$t$" -N 2>/dev/null | sed -n 's/^[0-9]*: Test command: *//p' | head -1 | tr -d '"')
+            [ -x "$exe" ] || continue
+            echo "=== $t ($exe) ==="
+            lldb --batch -o "run" -o "bt all" -o "register read" -o "quit" -- "$exe" 2>&1 | tail -120 || true
+          done
