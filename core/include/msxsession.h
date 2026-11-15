@@ -50,6 +50,13 @@ extern "C" {
 #define MSXSESSION_BOIP_PORT  65505
 #define MSXSESSION_WEBUI_PORT 64003
 
+/* The debugger's accent: the icon's blue.  INK is the text on an accent fill;
+ * LIGHT is the accent used as TEXT or lines on a dark theme (the pure blue is
+ * unreadable there). */
+#define MSXSESSION_ACCENT_RGB       0x0000FF
+#define MSXSESSION_ACCENT_INK_RGB   0xFFFFFF
+#define MSXSESSION_ACCENT_LIGHT_RGB 0x8FA8FF
+
 /* The MSX has two general-purpose joystick ports. */
 #define MSXSESSION_JOYSTICK_PORTS 2
 
