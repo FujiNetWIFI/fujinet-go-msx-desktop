@@ -128,7 +128,7 @@ jobs:
       # not add any displays"). The other five run.
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure -E '^(debugger_test|vdp_test|boot_smoke|fujinet_smoke|machine_switch_test|rpc_test|external_smoke)$'
+        run: ctest --output-on-failure -E '^(debugger_test|vdp_test|boot_smoke|fujinet_smoke|machine_switch_test|rpc_test|external_smoke|openmsx_hooks_test|vidtab_live|engine)$'
 
       # The app is built for x86_64 above and tested; this builds the arm64 half
       # (openMSX with its own static third-party chain, cross-compiled; it cannot run

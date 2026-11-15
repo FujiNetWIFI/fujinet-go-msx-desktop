@@ -90,7 +90,7 @@ jobs:
       # other five run.
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure -E '^(debugger_test|vdp_test|boot_smoke|fujinet_smoke|machine_switch_test|rpc_test|external_smoke)$'
+        run: ctest --output-on-failure -E '^(debugger_test|vdp_test|boot_smoke|fujinet_smoke|machine_switch_test|rpc_test|external_smoke|openmsx_hooks_test|vidtab_live|engine)$'
 
       - name: Re-run failed tests verbosely
         if: failure()

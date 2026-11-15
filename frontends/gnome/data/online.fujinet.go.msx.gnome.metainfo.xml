@@ -35,15 +35,15 @@
   <screenshots>
     <screenshot type="default">
       <caption>FujiNet CONFIG running on the emulated MSX2</caption>
-      <image>https://raw.githubusercontent.com/FujiNetWIFI/fujinet-go-msx-desktop/v0.3.1/data/screenshots/1_fujinet_config.png</image>
+      <image>https://raw.githubusercontent.com/FujiNetWIFI/fujinet-go-msx-desktop/v0.7.0/data/screenshots/1_fujinet_config.png</image>
     </screenshot>
     <screenshot>
-      <caption>The debugger's VDP tab: nametable, patterns, sprites, palette and registers of the V9938</caption>
-      <image>https://raw.githubusercontent.com/FujiNetWIFI/fujinet-go-msx-desktop/v0.3.1/data/screenshots/2_vdp_debugger.png</image>
+      <caption>The debugger's Video tab: the V9938 display with pixel, register, colour, line, timing and VRAM inspectors</caption>
+      <image>https://raw.githubusercontent.com/FujiNetWIFI/fujinet-go-msx-desktop/v0.7.0/data/screenshots/2_vdp_debugger.png</image>
     </screenshot>
     <screenshot>
-      <caption>The debugger's CPU &amp; Memory tab: Z80 registers, flags and a live memory view</caption>
-      <image>https://raw.githubusercontent.com/FujiNetWIFI/fujinet-go-msx-desktop/v0.3.1/data/screenshots/3_cpu_debugger.png</image>
+      <caption>The debugger's Disassembly tab: live Z80 disassembly with the PC marker, breakpoints and registers</caption>
+      <image>https://raw.githubusercontent.com/FujiNetWIFI/fujinet-go-msx-desktop/v0.7.0/data/screenshots/3_cpu_debugger.png</image>
     </screenshot>
   </screenshots>
   <developer id="online.fujinet">
@@ -51,6 +51,11 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.7.0" date="2026-11-15">
+      <description>
+        <p>The debugger gets the family's newer tools: twelve tabs with a Console prompt and expressions, Memory, Watches, Cart &amp; I/O, Trace and History, a Video tab (Display, Decoded, Beam and Values views, an inspector, Break on writes and per-line VDP register capture), a Sound tab for the PSG, SCC and FM chips, and Symbols. Registers are editable, breakpoints take conditions such as value &gt; old, and Access breakpoints are new.</p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-11-08">
       <description>
         <p>
