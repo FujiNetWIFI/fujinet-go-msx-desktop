@@ -249,9 +249,18 @@ static void import_media(HWND hwnd)
                    "*.dsk;*.cas;*.rom\0",
                    src, sizeof(src)))
         return;
-    if (msxsession_import_media(g_session, src, dest, sizeof(dest)) != 0)
+    char msg[1200];
+    if (msxsession_import_media(g_session, src, dest, sizeof(dest)) != 0) {
         MessageBoxA(hwnd, msxsession_last_error(g_session), "FujiNet Go MSX",
                     MB_ICONWARNING);
+        return;
+    }
+    {
+        const char *base = strrchr(dest, '/');
+        snprintf(msg, sizeof(msg), "Copied to FujiNet SD: %s\n\nMount it from "
+                 "FujiNet CONFIG to use it.", base ? base + 1 : dest);
+        MessageBoxA(hwnd, msg, "FujiNet Go MSX", MB_ICONINFORMATION);
+    }
 }
 
 static void show_fujinet_config(void)

@@ -511,21 +511,19 @@ int msxsession_import_rom(msxsession *s, const char *src_path,
 int msxsession_import_media(msxsession *s, const char *src_path,
                             char *dest_out, int dest_sz)
 {
-    /* Disk and cassette images go to FujiNet's SD directory, to be mounted
-     * from the web UI. Cartridge images are openMSX's business, not
-     * FujiNet's, so they go to the session's own cartridge directory. */
-    static const char *const k_disk_exts[] = { "dsk", "cas", NULL };
-    static const char *const k_cart_exts[] = { "rom", NULL };
+    /* Disk, cassette and cartridge images all go to FujiNet's SD directory,
+     * to be mounted from CONFIG or the web UI. FujiNet mounts a .rom as a
+     * ROM image and streams it to the FujiNet cartridge, which boots it
+     * (a megaROM's mapper comes from a name tag such as "game[ASCII8].rom"). */
+    static const char *const k_media_exts[] = { "dsk", "cas", "rom", NULL };
     const char *ext = path_ext(src_path);
     const char *base = path_base(src_path);
     const char *dir = NULL;
     char dst[MSX_PATH_MAX];
     int i;
 
-    for (i = 0; k_disk_exts[i] && !dir; i++)
-        if (ext_is(ext, k_disk_exts[i])) dir = s->fujinet_sd;
-    for (i = 0; k_cart_exts[i] && !dir; i++)
-        if (ext_is(ext, k_cart_exts[i])) dir = s->carts_dir;
+    for (i = 0; k_media_exts[i] && !dir; i++)
+        if (ext_is(ext, k_media_exts[i])) dir = s->fujinet_sd;
 
     if (!dir) {
         session_set_error(s, "Unsupported media type \".%s\" (expected a "
