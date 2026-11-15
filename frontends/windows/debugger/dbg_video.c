@@ -56,7 +56,7 @@ typedef struct {
 
 typedef struct {
     HWND page, view, source, zoom, brk, status, note, pic, sec;
-    HWND ov[MAX_OVERLAYS];
+    HWND overlay_box[MAX_OVERLAYS];
     unsigned ov_bit[MAX_OVERLAYS];
     int nov;
     HWND label_view, label_zoom, label_src, label_bank, bank;
@@ -64,7 +64,7 @@ typedef struct {
     HWND vram_title, vram_addr, vram_prev, vram_next, vram_note, vram_view;
     int vram_note_set;          /* the note holds a message, not just the address */
     msxdebug *engine;
-    HFONT ui, mono;
+    HFONT ui_font, mono;
     int dpi;
     msxvid_tab *tab;
     int updating;
@@ -72,132 +72,132 @@ typedef struct {
     int tracking;
     int pal_hover, col_tracking;
     int zoom_val[MAX_ZOOMS], nzoom;
-    listfill rf, lf;
+    listfill reg_fill, line_fill;
     BITMAPINFO bmi;
 } vidwin;
 
-#define S(v, n) MulDiv((n), (v)->dpi, 96)
+#define scaled(win, num) MulDiv((num), (win)->dpi, 96)
 
 /* ---- text ------------------------------------------------------------------------ */
 
 /* UTF-8 to UTF-16; '\n' becomes CR LF (multi-line controls want it) */
 static wchar_t *wide(const char *utf8)
 {
-    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0), i;
-    wchar_t *w = malloc(((size_t)n + 1) * sizeof *w), *o, *d;
-    if (!w) return NULL;
-    o = malloc(((size_t)n * 2 + 2) * sizeof *w);
-    if (!o) {
-        free(w);
+    int num = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0), idx;
+    wchar_t *wtext = malloc(((size_t)num + 1) * sizeof *wtext), *outbuf, *dest;
+    if (!wtext) return NULL;
+    outbuf = malloc(((size_t)num * 2 + 2) * sizeof *wtext);
+    if (!outbuf) {
+        free(wtext);
         return NULL;
     }
-    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, n);
-    d = o;
-    for (i = 0; w[i]; i++) {
-        if (w[i] == L'\n') *d++ = L'\r';
-        *d++ = w[i];
+    MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wtext, num);
+    dest = outbuf;
+    for (idx = 0; wtext[idx]; idx++) {
+        if (wtext[idx] == L'\n') *dest++ = L'\r';
+        *dest++ = wtext[idx];
     }
-    *d = 0;
-    free(w);
-    return o;
+    *dest = 0;
+    free(wtext);
+    return outbuf;
 }
 
 /* a control's text, set only when it changed (no flicker on the live refresh) */
-static void set_text(HWND h, const char *utf8)
+static void set_text(HWND hwnd, const char *utf8)
 {
-    wchar_t *w = wide(utf8), cur[2048];
-    if (!w) return;
-    GetWindowTextW(h, cur, 2048);
-    if (wcscmp(cur, w) != 0) SetWindowTextW(h, w);
-    free(w);
+    wchar_t *wtext = wide(utf8), cur[2048];
+    if (!wtext) return;
+    GetWindowTextW(hwnd, cur, 2048);
+    if (wcscmp(cur, wtext) != 0) SetWindowTextW(hwnd, wtext);
+    free(wtext);
 }
 
-static uint64_t fnv(uint64_t h, const void *data, size_t n)
+static uint64_t fnv(uint64_t hash, const void *data, size_t size)
 {
-    const unsigned char *p = data;
-    size_t i;
-    for (i = 0; i < n; i++) h = (h ^ p[i]) * 1099511628211ull;
-    return h;
+    const unsigned char *bytes = data;
+    size_t idx;
+    for (idx = 0; idx < size; idx++) hash = (hash ^ bytes[idx]) * 1099511628211ull;
+    return hash;
 }
 
 /* ---- the picture --------------------------------------------------------------------- */
 
-static void pic_update_scroll(vidwin *v)
+static void pic_update_scroll(vidwin *win)
 {
-    RECT rc;
-    SCROLLINFO si;
-    int pw = 0, ph = 0;
-    GetClientRect(v->pic, &rc);
-    msxvid_tab_picture(v->tab, &pw, &ph);
-    memset(&si, 0, sizeof si);
-    si.cbSize = sizeof si;
-    si.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
-    si.nMin = 0;
-    si.nMax = pw > 0 ? pw - 1 : 0;
-    si.nPage = (UINT)rc.right;
-    if (v->scroll_x > pw - rc.right) v->scroll_x = pw > rc.right ? pw - rc.right : 0;
-    si.nPos = v->scroll_x;
-    SetScrollInfo(v->pic, SB_HORZ, &si, TRUE);
-    si.nMax = ph > 0 ? ph - 1 : 0;
-    si.nPage = (UINT)rc.bottom;
-    if (v->scroll_y > ph - rc.bottom) v->scroll_y = ph > rc.bottom ? ph - rc.bottom : 0;
-    si.nPos = v->scroll_y;
-    SetScrollInfo(v->pic, SB_VERT, &si, TRUE);
+    RECT bounds;
+    SCROLLINFO scroll_info;
+    int pic_width = 0, pic_height = 0;
+    GetClientRect(win->pic, &bounds);
+    msxvid_tab_picture(win->tab, &pic_width, &pic_height);
+    memset(&scroll_info, 0, sizeof scroll_info);
+    scroll_info.cbSize = sizeof scroll_info;
+    scroll_info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+    scroll_info.nMin = 0;
+    scroll_info.nMax = pic_width > 0 ? pic_width - 1 : 0;
+    scroll_info.nPage = (UINT)bounds.right;
+    if (win->scroll_x > pic_width - bounds.right) win->scroll_x = pic_width > bounds.right ? pic_width - bounds.right : 0;
+    scroll_info.nPos = win->scroll_x;
+    SetScrollInfo(win->pic, SB_HORZ, &scroll_info, TRUE);
+    scroll_info.nMax = pic_height > 0 ? pic_height - 1 : 0;
+    scroll_info.nPage = (UINT)bounds.bottom;
+    if (win->scroll_y > pic_height - bounds.bottom) win->scroll_y = pic_height > bounds.bottom ? pic_height - bounds.bottom : 0;
+    scroll_info.nPos = win->scroll_y;
+    SetScrollInfo(win->pic, SB_VERT, &scroll_info, TRUE);
 }
 
-static void pic_paint(vidwin *v, HWND h)
+static void pic_paint(vidwin *win, HWND hwnd)
 {
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(h, &ps), mem;
-    RECT rc;
+    PAINTSTRUCT paint;
+    HDC device = BeginPaint(hwnd, &paint), mem;
+    RECT bounds;
     HBITMAP bmp, old;
-    int pw = 0, ph = 0, marks, hover[4] = { 0 }, pin[4] = { 0 };
-    const uint32_t *px;
-    HBRUSH bg = CreateSolidBrush(RGB(18, 18, 24));
-    GetClientRect(h, &rc);
-    mem = CreateCompatibleDC(dc);
-    bmp = CreateCompatibleBitmap(dc, rc.right > 0 ? rc.right : 1, rc.bottom > 0 ? rc.bottom : 1);
+    int pic_width = 0, pic_height = 0, marks, hover[4] = { 0 }, pin[4] = { 0 };
+    const uint32_t *pixels;
+    HBRUSH back_brush = CreateSolidBrush(RGB(18, 18, 24));
+    GetClientRect(hwnd, &bounds);
+    mem = CreateCompatibleDC(device);
+    bmp = CreateCompatibleBitmap(device, bounds.right > 0 ? bounds.right : 1, bounds.bottom > 0 ? bounds.bottom : 1);
     old = SelectObject(mem, bmp);
-    FillRect(mem, &rc, bg);
-    px = msxvid_tab_picture(v->tab, &pw, &ph);
-    if (!px) {
-        const char *why = msxvid_tab_why(v->tab);
-        wchar_t *w = wide(why && *why ? why : "Nothing to show");
-        RECT tr = rc;
-        InflateRect(&tr, -S(v, 10), -S(v, 10));
+    FillRect(mem, &bounds, back_brush);
+    pixels = msxvid_tab_picture(win->tab, &pic_width, &pic_height);
+    if (!pixels) {
+        const char *why = msxvid_tab_why(win->tab);
+        wchar_t *wtext = wide(why && *why ? why : "Nothing to show");
+        RECT text_rect = bounds;
+        InflateRect(&text_rect, -scaled(win, 10), -scaled(win, 10));
         SetBkMode(mem, TRANSPARENT);
         SetTextColor(mem, RGB(140, 140, 148));
-        SelectObject(mem, v->ui);
-        if (w) DrawTextW(mem, w, -1, &tr, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
-        free(w);
+        SelectObject(mem, win->ui_font);
+        if (wtext) DrawTextW(mem, wtext, -1, &text_rect, DT_CENTER | DT_WORDBREAK | DT_NOPREFIX);
+        free(wtext);
     } else {
         HPEN pen_h, pen_p, pen_k, oldpen;
         HGDIOBJ oldbr;
-        v->bmi.bmiHeader.biWidth = pw;      /* the buffer is pw words per row, whatever the view */
-        v->bmi.bmiHeader.biHeight = -ph;    /* top-down */
+        win->bmi.bmiHeader.biWidth = pic_width;      /* the buffer is pw words per row, whatever the view */
+        win->bmi.bmiHeader.biHeight = -pic_height;    /* top-down */
         SetStretchBltMode(mem, COLORONCOLOR);
-        StretchDIBits(mem, -v->scroll_x, -v->scroll_y, pw, ph, 0, 0, pw, ph, px, &v->bmi, DIB_RGB_COLORS, SRCCOPY);
-        marks = msxvid_tab_marks(v->tab, hover, pin);
+        StretchDIBits(mem, -win->scroll_x, -win->scroll_y, pic_width, pic_height, 0, 0, pic_width, pic_height, pixels, &win->bmi, DIB_RGB_COLORS, SRCCOPY);
+        marks = msxvid_tab_marks(win->tab, hover, pin);
         oldbr = SelectObject(mem, GetStockObject(NULL_BRUSH));
         pen_h = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
         pen_p = CreatePen(PS_SOLID, 2, ACCENT_LIGHT);
         pen_k = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
         if (marks & 1) {            /* hover: a white box just outside the pixel, over a dark one */
             oldpen = SelectObject(mem, pen_k);
-            Rectangle(mem, hover[0] - v->scroll_x - 2, hover[1] - v->scroll_y - 2, hover[0] - v->scroll_x + hover[2] + 2,
-                      hover[1] - v->scroll_y + hover[3] + 2);
+            Rectangle(mem, hover[0] - win->scroll_x - 2, hover[1] - win->scroll_y - 2, hover[0] - win->scroll_x + hover[2] + 2,
+                      hover[1] - win->scroll_y + hover[3] + 2);
             SelectObject(mem, pen_h);
-            Rectangle(mem, hover[0] - v->scroll_x - 1, hover[1] - v->scroll_y - 1, hover[0] - v->scroll_x + hover[2] + 1,
-                      hover[1] - v->scroll_y + hover[3] + 1);
+            Rectangle(mem, hover[0] - win->scroll_x - 1, hover[1] - win->scroll_y - 1, hover[0] - win->scroll_x + hover[2] + 1,
+                      hover[1] - win->scroll_y + hover[3] + 1);
             SelectObject(mem, oldpen);
         }
         if (marks & 2) {            /* pin: a thick yellow box */
             oldpen = SelectObject(mem, pen_k);
-            Rectangle(mem, pin[0] - v->scroll_x - 3, pin[1] - v->scroll_y - 3, pin[0] - v->scroll_x + pin[2] + 3,
-                      pin[1] - v->scroll_y + pin[3] + 3);
+            Rectangle(mem, pin[0] - win->scroll_x - 3, pin[1] - win->scroll_y - 3, pin[0] - win->scroll_x + pin[2] + 3,
+                      pin[1] - win->scroll_y + pin[3] + 3);
             SelectObject(mem, pen_p);
-            Rectangle(mem, pin[0] - v->scroll_x - 1, pin[1] - v->scroll_y - 1, pin[0] - v->scroll_x + pin[2] + 1,
-                      pin[1] - v->scroll_y + pin[3] + 1);
+            Rectangle(mem, pin[0] - win->scroll_x - 1, pin[1] - win->scroll_y - 1, pin[0] - win->scroll_x + pin[2] + 1,
+                      pin[1] - win->scroll_y + pin[3] + 1);
             SelectObject(mem, oldpen);
         }
         SelectObject(mem, oldbr);
@@ -205,131 +205,131 @@ static void pic_paint(vidwin *v, HWND h)
         DeleteObject(pen_p);
         DeleteObject(pen_k);
     }
-    BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+    BitBlt(device, 0, 0, bounds.right, bounds.bottom, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old);
     DeleteObject(bmp);
     DeleteDC(mem);
-    DeleteObject(bg);
-    EndPaint(h, &ps);
+    DeleteObject(back_brush);
+    EndPaint(hwnd, &paint);
 }
 
 /* Source applies to the Decoded view, Bank to its Patterns source */
-static void enable_choosers(vidwin *v)
+static void enable_choosers(vidwin *win)
 {
-    const int decoded = msxvid_tab_view(v->tab) == MSXVID_V_DECODED;
-    EnableWindow(v->source, decoded);
-    EnableWindow(v->bank, decoded && msxvid_tab_source(v->tab) == MSXVID_SRC_PATTERNS);
+    const int decoded = msxvid_tab_view(win->tab) == MSXVID_V_DECODED;
+    EnableWindow(win->source, decoded);
+    EnableWindow(win->bank, decoded && msxvid_tab_source(win->tab) == MSXVID_SRC_PATTERNS);
 }
 
-static void update_pixel(vidwin *v)
+static void update_pixel(vidwin *win)
 {
-    const msxvid_pixel *p = msxvid_tab_pixel(v->tab);
-    set_text(v->pixel, p && p->text[0] ? p->text
+    const msxvid_pixel *pixel = msxvid_tab_pixel(win->tab);
+    set_text(win->pixel, pixel && pixel->text[0] ? pixel->text
                                        : "Move over the picture to inspect a pixel.\n"
                                          "Click to pin it; click again to unpin.\n"
                                          "Double-click to break on writes to what drew it.");
-    if (v->cols) InvalidateRect(v->cols, NULL, FALSE);
-    if (v->brk) EnableWindow(v->brk, msxvid_tab_can_break(v->tab));
+    if (win->cols) InvalidateRect(win->cols, NULL, FALSE);
+    if (win->brk) EnableWindow(win->brk, msxvid_tab_can_break(win->tab));
 }
 
-static void set_note(vidwin *v, const char *text)
+static void set_note(vidwin *win, const char *text)
 {
-    set_text(v->note, text);
+    set_text(win->note, text);
 }
 
 /* Break on writes to the RAM byte the inspected pixel came from, and say what was done. */
-static void break_on_pixel(vidwin *v)
+static void break_on_pixel(vidwin *win)
 {
     char msg[160];
-    int id = msxvid_tab_break_on_pixel(v->tab);
-    if (id >= 0) snprintf(msg, sizeof msg, "Break on writes added (see Breakpoints)");
+    int ctl_id = msxvid_tab_break_on_pixel(win->tab);
+    if (ctl_id >= 0) snprintf(msg, sizeof msg, "Break on writes added (see Breakpoints)");
     else snprintf(msg, sizeof msg, "Nothing to break on: pin or hover a tile, a sprite, a bitmap pixel or a palette swatch");
-    set_note(v, msg);
+    set_note(win, msg);
 }
 
-static LRESULT CALLBACK pic_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+static LRESULT CALLBACK pic_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    vidwin *v = (vidwin *)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (!v) return DefWindowProcW(h, msg, wp, lp);
+    vidwin *win = (vidwin *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (!win) return DefWindowProcW(hwnd, msg, wparam, lparam);
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT:
-        pic_paint(v, h);
+        pic_paint(win, hwnd);
         return 0;
     case WM_SIZE:
-        pic_update_scroll(v);
+        pic_update_scroll(win);
         return 0;
     case WM_HSCROLL:
     case WM_VSCROLL: {
-        SCROLLINFO si;
+        SCROLLINFO scroll_info;
         int bar = msg == WM_HSCROLL ? SB_HORZ : SB_VERT, pos;
-        memset(&si, 0, sizeof si);
-        si.cbSize = sizeof si;
-        si.fMask = SIF_ALL;
-        GetScrollInfo(h, bar, &si);
-        pos = si.nPos;
-        switch (LOWORD(wp)) {
+        memset(&scroll_info, 0, sizeof scroll_info);
+        scroll_info.cbSize = sizeof scroll_info;
+        scroll_info.fMask = SIF_ALL;
+        GetScrollInfo(hwnd, bar, &scroll_info);
+        pos = scroll_info.nPos;
+        switch (LOWORD(wparam)) {
         case SB_LINELEFT: pos -= 16; break;
         case SB_LINERIGHT: pos += 16; break;
-        case SB_PAGELEFT: pos -= (int)si.nPage; break;
-        case SB_PAGERIGHT: pos += (int)si.nPage; break;
-        case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+        case SB_PAGELEFT: pos -= (int)scroll_info.nPage; break;
+        case SB_PAGERIGHT: pos += (int)scroll_info.nPage; break;
+        case SB_THUMBTRACK: case SB_THUMBPOSITION: pos = scroll_info.nTrackPos; break;
         default: break;
         }
         if (pos < 0) pos = 0;
-        if (bar == SB_HORZ) v->scroll_x = pos; else v->scroll_y = pos;
-        pic_update_scroll(v);
-        InvalidateRect(h, NULL, FALSE);
+        if (bar == SB_HORZ) win->scroll_x = pos; else win->scroll_y = pos;
+        pic_update_scroll(win);
+        InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     }
     case WM_MOUSEWHEEL:
-        v->scroll_y -= GET_WHEEL_DELTA_WPARAM(wp) / 3;
-        if (v->scroll_y < 0) v->scroll_y = 0;
-        pic_update_scroll(v);
-        InvalidateRect(h, NULL, FALSE);
+        win->scroll_y -= GET_WHEEL_DELTA_WPARAM(wparam) / 3;
+        if (win->scroll_y < 0) win->scroll_y = 0;
+        pic_update_scroll(win);
+        InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     case WM_MOUSEMOVE: {
-        int x = (short)LOWORD(lp) + v->scroll_x, y = (short)HIWORD(lp) + v->scroll_y;
-        if (!v->tracking) {
-            TRACKMOUSEEVENT t;
-            memset(&t, 0, sizeof t);
-            t.cbSize = sizeof t;
-            t.dwFlags = TME_LEAVE;
-            t.hwndTrack = h;
-            TrackMouseEvent(&t);
-            v->tracking = 1;
+        int pos_x = (short)LOWORD(lparam) + win->scroll_x, pos_y = (short)HIWORD(lparam) + win->scroll_y;
+        if (!win->tracking) {
+            TRACKMOUSEEVENT track;
+            memset(&track, 0, sizeof track);
+            track.cbSize = sizeof track;
+            track.dwFlags = TME_LEAVE;
+            track.hwndTrack = hwnd;
+            TrackMouseEvent(&track);
+            win->tracking = 1;
         }
-        if (msxvid_tab_hover(v->tab, x, y)) {
-            InvalidateRect(h, NULL, FALSE);
-            update_pixel(v);
+        if (msxvid_tab_hover(win->tab, pos_x, pos_y)) {
+            InvalidateRect(hwnd, NULL, FALSE);
+            update_pixel(win);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        v->tracking = 0;
-        if (msxvid_tab_hover(v->tab, -1, -1)) {
-            InvalidateRect(h, NULL, FALSE);
-            update_pixel(v);
+        win->tracking = 0;
+        if (msxvid_tab_hover(win->tab, -1, -1)) {
+            InvalidateRect(hwnd, NULL, FALSE);
+            update_pixel(win);
         }
         return 0;
     case WM_LBUTTONDOWN:
-        SetFocus(h);
-        msxvid_tab_hover(v->tab, (short)LOWORD(lp) + v->scroll_x, (short)HIWORD(lp) + v->scroll_y);
-        msxvid_tab_pin(v->tab, (short)LOWORD(lp) + v->scroll_x, (short)HIWORD(lp) + v->scroll_y);
-        InvalidateRect(h, NULL, FALSE);
-        update_pixel(v);
+        SetFocus(hwnd);
+        msxvid_tab_hover(win->tab, (short)LOWORD(lparam) + win->scroll_x, (short)HIWORD(lparam) + win->scroll_y);
+        msxvid_tab_pin(win->tab, (short)LOWORD(lparam) + win->scroll_x, (short)HIWORD(lparam) + win->scroll_y);
+        InvalidateRect(hwnd, NULL, FALSE);
+        update_pixel(win);
         return 0;
     case WM_LBUTTONDBLCLK:
-        msxvid_tab_hover(v->tab, (short)LOWORD(lp) + v->scroll_x, (short)HIWORD(lp) + v->scroll_y);
-        break_on_pixel(v);
-        InvalidateRect(h, NULL, FALSE);
-        update_pixel(v);
+        msxvid_tab_hover(win->tab, (short)LOWORD(lparam) + win->scroll_x, (short)HIWORD(lparam) + win->scroll_y);
+        break_on_pixel(win);
+        InvalidateRect(hwnd, NULL, FALSE);
+        update_pixel(win);
         return 0;
     default:
         break;
     }
-    return DefWindowProcW(h, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
 /* ---- the Colours panel: the two colours as big swatches and a description ---- */
@@ -337,12 +337,12 @@ static LRESULT CALLBACK pic_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 #define PAL_MAX_CELL 64
 
 /* the grid's cell size, from the panel's size: 4 x 4 swatches, squared */
-static void col_metrics(vidwin *v, const RECT *rc, int *cell, int *top)
+static void col_metrics(vidwin *win, const RECT *bounds, int *cell, int *top)
 {
-    int cell_size = rc->right / PAL_COLS - S(v, 6);
-    int by_height = (rc->bottom - S(v, 80)) / PAL_ROWS - S(v, 6);
+    int cell_size = bounds->right / PAL_COLS - scaled(win, 6);
+    int by_height = (bounds->bottom - scaled(win, 80)) / PAL_ROWS - scaled(win, 6);
     if (by_height < cell_size) cell_size = by_height;
-    if (cell_size > S(v, PAL_MAX_CELL)) cell_size = S(v, PAL_MAX_CELL);
+    if (cell_size > scaled(win, PAL_MAX_CELL)) cell_size = scaled(win, PAL_MAX_CELL);
     if (cell_size < 12) cell_size = 12;
     *cell = cell_size;
     *top = 0;
@@ -356,30 +356,30 @@ static void swatch_describe(const msxvid_swatch *swatch, char *out, size_t cap)
              swatch->inspected ? "\nThe inspected pixel has it." : "");
 }
 
-static void col_paint(vidwin *v, HWND h)
+static void col_paint(vidwin *win, HWND hwnd)
 {
-    PAINTSTRUCT ps;
-    HDC dc = BeginPaint(h, &ps), mem;
+    PAINTSTRUCT paint;
+    HDC device = BeginPaint(hwnd, &paint), mem;
     HBITMAP bmp, old;
-    RECT rc;
+    RECT bounds;
     const msxvid_swatch *swatches;
-    int count = msxvid_tab_swatches(v->tab, &swatches);
+    int count = msxvid_tab_swatches(win->tab, &swatches);
     int cell, top, index;
     HFONT oldf;
-    GetClientRect(h, &rc);
-    mem = CreateCompatibleDC(dc);
-    bmp = CreateCompatibleBitmap(dc, rc.right > 0 ? rc.right : 1, rc.bottom > 0 ? rc.bottom : 1);
+    GetClientRect(hwnd, &bounds);
+    mem = CreateCompatibleDC(device);
+    bmp = CreateCompatibleBitmap(device, bounds.right > 0 ? bounds.right : 1, bounds.bottom > 0 ? bounds.bottom : 1);
     old = SelectObject(mem, bmp);
-    FillRect(mem, &rc, GetSysColorBrush(COLOR_BTNFACE));
+    FillRect(mem, &bounds, GetSysColorBrush(COLOR_BTNFACE));
     SetBkMode(mem, TRANSPARENT);
-    oldf = SelectObject(mem, v->mono);
-    col_metrics(v, &rc, &cell, &top);
+    oldf = SelectObject(mem, win->mono);
+    col_metrics(win, &bounds, &cell, &top);
     for (index = 0; index < count && index < PAL_COLS * PAL_ROWS; index++) {
         const msxvid_swatch *swatch = &swatches[index];
         RECT cell_rect;
         HBRUSH fill = CreateSolidBrush(RGB((swatch->rgb >> 16) & 255, (swatch->rgb >> 8) & 255, swatch->rgb & 255));
-        cell_rect.left = S(v, 3) + (index % PAL_COLS) * (cell + S(v, 6));
-        cell_rect.top = top + S(v, 3) + (index / PAL_COLS) * (cell + S(v, 6));
+        cell_rect.left = scaled(win, 3) + (index % PAL_COLS) * (cell + scaled(win, 6));
+        cell_rect.top = top + scaled(win, 3) + (index / PAL_COLS) * (cell + scaled(win, 6));
         cell_rect.right = cell_rect.left + cell;
         cell_rect.bottom = cell_rect.top + cell;
         FillRect(mem, &cell_rect, fill);
@@ -394,7 +394,7 @@ static void col_paint(vidwin *v, HWND h)
             DeleteObject(accent_brush);
             DeleteObject(white_brush);
         }
-        if (index == v->pal_hover) {
+        if (index == win->pal_hover) {
             HBRUSH edge = CreateSolidBrush(RGB(0, 0, 0));
             RECT outline = cell_rect;
             InflateRect(&outline, 2, 2);
@@ -404,9 +404,9 @@ static void col_paint(vidwin *v, HWND h)
     }
     {
         char text[300];
-        RECT text_rect = { 0, top + PAL_ROWS * (cell + S(v, 6)) + S(v, 12), rc.right, rc.bottom };
+        RECT text_rect = { 0, top + PAL_ROWS * (cell + scaled(win, 6)) + scaled(win, 12), bounds.right, bounds.bottom };
         wchar_t *wide_text;
-        int shown = v->pal_hover;
+        int shown = win->pal_hover;
         text[0] = 0;
         if (shown < 0)
             for (index = 0; index < count; index++)
@@ -419,517 +419,517 @@ static void col_paint(vidwin *v, HWND h)
         free(wide_text);
     }
     SelectObject(mem, oldf);
-    BitBlt(dc, 0, 0, rc.right, rc.bottom, mem, 0, 0, SRCCOPY);
+    BitBlt(device, 0, 0, bounds.right, bounds.bottom, mem, 0, 0, SRCCOPY);
     SelectObject(mem, old);
     DeleteObject(bmp);
     DeleteDC(mem);
-    EndPaint(h, &ps);
+    EndPaint(hwnd, &paint);
 }
 
 /* the swatch under a point of the panel, or -1 */
-static int col_hit(vidwin *v, HWND h, int px, int py)
+static int col_hit(vidwin *win, HWND hwnd, int mouse_x, int mouse_y)
 {
-    RECT rc;
+    RECT bounds;
     int cell, top, column, row, step;
-    GetClientRect(h, &rc);
-    col_metrics(v, &rc, &cell, &top);
-    step = cell + S(v, 6);
-    if (py < top + S(v, 3) || px < S(v, 3)) return -1;
-    column = (px - S(v, 3)) / step;
-    row = (py - top - S(v, 3)) / step;
+    GetClientRect(hwnd, &bounds);
+    col_metrics(win, &bounds, &cell, &top);
+    step = cell + scaled(win, 6);
+    if (mouse_y < top + scaled(win, 3) || mouse_x < scaled(win, 3)) return -1;
+    column = (mouse_x - scaled(win, 3)) / step;
+    row = (mouse_y - top - scaled(win, 3)) / step;
     if (column >= PAL_COLS || row >= PAL_ROWS) return -1;
-    if ((px - S(v, 3)) % step >= cell || (py - top - S(v, 3)) % step >= cell) return -1;
+    if ((mouse_x - scaled(win, 3)) % step >= cell || (mouse_y - top - scaled(win, 3)) % step >= cell) return -1;
     return row * PAL_COLS + column;
 }
 
-static LRESULT CALLBACK col_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+static LRESULT CALLBACK col_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    vidwin *v = (vidwin *)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (!v) return DefWindowProcW(h, msg, wp, lp);
+    vidwin *win = (vidwin *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (!win) return DefWindowProcW(hwnd, msg, wparam, lparam);
     switch (msg) {
     case WM_ERASEBKGND:
         return 1;
     case WM_PAINT:
-        col_paint(v, h);
+        col_paint(win, hwnd);
         return 0;
     case WM_MOUSEMOVE: {
-        int index = col_hit(v, h, (short)LOWORD(lp), (short)HIWORD(lp));
-        if (!v->col_tracking) {
+        int index = col_hit(win, hwnd, (short)LOWORD(lparam), (short)HIWORD(lparam));
+        if (!win->col_tracking) {
             TRACKMOUSEEVENT track;
             memset(&track, 0, sizeof track);
             track.cbSize = sizeof track;
             track.dwFlags = TME_LEAVE;
-            track.hwndTrack = h;
+            track.hwndTrack = hwnd;
             TrackMouseEvent(&track);
-            v->col_tracking = 1;
+            win->col_tracking = 1;
         }
-        if (index != v->pal_hover) {
-            v->pal_hover = index;
-            InvalidateRect(h, NULL, FALSE);
+        if (index != win->pal_hover) {
+            win->pal_hover = index;
+            InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
     }
     case WM_MOUSELEAVE:
-        v->col_tracking = 0;
-        if (v->pal_hover != -1) {
-            v->pal_hover = -1;
-            InvalidateRect(h, NULL, FALSE);
+        win->col_tracking = 0;
+        if (win->pal_hover != -1) {
+            win->pal_hover = -1;
+            InvalidateRect(hwnd, NULL, FALSE);
         }
         return 0;
     default:
         break;
     }
-    return DefWindowProcW(h, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
 /* ---- sections ----------------------------------------------------------------------- */
 
-static void lv_cell(HWND lv, int row, int col, const char *text)
+static void lv_cell(HWND list_view, int row, int col, const char *text)
 {
-    wchar_t *w = wide(text);
-    LVITEMW it;
-    memset(&it, 0, sizeof it);
-    it.iSubItem = col;
-    it.pszText = w ? w : L"";
+    wchar_t *wtext = wide(text);
+    LVITEMW item;
+    memset(&item, 0, sizeof item);
+    item.iSubItem = col;
+    item.pszText = wtext ? wtext : L"";
     if (col == 0) {
-        it.mask = LVIF_TEXT;
-        it.iItem = row;
-        SendMessageW(lv, LVM_INSERTITEMW, 0, (LPARAM)&it);
+        item.mask = LVIF_TEXT;
+        item.iItem = row;
+        SendMessageW(list_view, LVM_INSERTITEMW, 0, (LPARAM)&item);
     } else {
-        SendMessageW(lv, LVM_SETITEMTEXTW, (WPARAM)row, (LPARAM)&it);
+        SendMessageW(list_view, LVM_SETITEMTEXTW, (WPARAM)row, (LPARAM)&item);
     }
-    free(w);
+    free(wtext);
 }
 
-static void mark_hot(listfill *lf, int n, int i, int hot)
+static void mark_hot(listfill *line_fill, int num, int idx, int hot)
 {
-    if (i == 0) {
-        free(lf->hot);
-        lf->hot = calloc((size_t)(n > 0 ? n : 1), 1);
-        lf->nhot = lf->hot ? n : 0;
+    if (idx == 0) {
+        free(line_fill->hot);
+        line_fill->hot = calloc((size_t)(num > 0 ? num : 1), 1);
+        line_fill->nhot = line_fill->hot ? num : 0;
     }
-    if (lf->hot && i < lf->nhot) lf->hot[i] = (unsigned char)hot;
+    if (line_fill->hot && idx < line_fill->nhot) line_fill->hot[idx] = (unsigned char)hot;
 }
 
-static void fill_regs(vidwin *v)
+static void fill_regs(vidwin *win)
 {
-    const msxvid_reg *r;
-    int n = msxvid_tab_regs(v->tab, &r), i;
+    const msxvid_reg *entry;
+    int num = msxvid_tab_regs(win->tab, &entry), idx;
     uint64_t sig = 1469598103934665603ull;
     char cell[32];
-    for (i = 0; i < n; i++) {
-        int hot = r[i].age < MSXVID_REG_FADE;
-        sig = fnv(sig, r[i].name, strlen(r[i].name));
-        sig = fnv(sig, r[i].value, strlen(r[i].value));
-        sig = fnv(sig, r[i].meaning, strlen(r[i].meaning));
-        sig = fnv(sig, &r[i].writes, sizeof r[i].writes);
+    for (idx = 0; idx < num; idx++) {
+        int hot = entry[idx].age < MSXVID_REG_FADE;
+        sig = fnv(sig, entry[idx].name, strlen(entry[idx].name));
+        sig = fnv(sig, entry[idx].value, strlen(entry[idx].value));
+        sig = fnv(sig, entry[idx].meaning, strlen(entry[idx].meaning));
+        sig = fnv(sig, &entry[idx].writes, sizeof entry[idx].writes);
         sig = fnv(sig, &hot, sizeof hot);
     }
-    if (v->rf.have_sig && v->rf.sig == sig) return;
-    v->rf.sig = sig;
-    v->rf.have_sig = 1;
-    SendMessageW(v->regs, WM_SETREDRAW, FALSE, 0);
-    SendMessageW(v->regs, LVM_DELETEALLITEMS, 0, 0);
-    for (i = 0; i < n; i++) {
-        lv_cell(v->regs, i, 0, r[i].name);
-        lv_cell(v->regs, i, 1, r[i].value);
-        snprintf(cell, sizeof cell, "%d", r[i].writes);
-        lv_cell(v->regs, i, 2, cell);
-        if (r[i].first_line >= 0) snprintf(cell, sizeof cell, "%d", r[i].first_line);
+    if (win->reg_fill.have_sig && win->reg_fill.sig == sig) return;
+    win->reg_fill.sig = sig;
+    win->reg_fill.have_sig = 1;
+    SendMessageW(win->regs, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(win->regs, LVM_DELETEALLITEMS, 0, 0);
+    for (idx = 0; idx < num; idx++) {
+        lv_cell(win->regs, idx, 0, entry[idx].name);
+        lv_cell(win->regs, idx, 1, entry[idx].value);
+        snprintf(cell, sizeof cell, "%d", entry[idx].writes);
+        lv_cell(win->regs, idx, 2, cell);
+        if (entry[idx].first_line >= 0) snprintf(cell, sizeof cell, "%d", entry[idx].first_line);
         else snprintf(cell, sizeof cell, "-");
-        lv_cell(v->regs, i, 3, cell);
-        lv_cell(v->regs, i, 4, r[i].meaning);
-        mark_hot(&v->rf, n, i, r[i].age < MSXVID_REG_FADE);
+        lv_cell(win->regs, idx, 3, cell);
+        lv_cell(win->regs, idx, 4, entry[idx].meaning);
+        mark_hot(&win->reg_fill, num, idx, entry[idx].age < MSXVID_REG_FADE);
     }
-    if (n == 0) mark_hot(&v->rf, 0, 0, 0);
-    SendMessageW(v->regs, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(v->regs, NULL, TRUE);
+    if (num == 0) mark_hot(&win->reg_fill, 0, 0, 0);
+    SendMessageW(win->regs, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(win->regs, NULL, TRUE);
 }
 
-static void fill_lines(vidwin *v)
+static void fill_lines(vidwin *win)
 {
-    const msxvid_band *r;
-    int n = msxvid_tab_lines(v->tab, &r), i;
+    const msxvid_band *entry;
+    int num = msxvid_tab_lines(win->tab, &entry), idx;
     uint64_t sig = 1469598103934665603ull;
-    for (i = 0; i < n; i++) {
-        sig = fnv(sig, &r[i], sizeof r[i]);
+    for (idx = 0; idx < num; idx++) {
+        sig = fnv(sig, &entry[idx], sizeof entry[idx]);
     }
-    sig = fnv(sig, &n, sizeof n);
-    if (v->lf.have_sig && v->lf.sig == sig) return;
-    v->lf.sig = sig;
-    v->lf.have_sig = 1;
-    SendMessageW(v->lines, WM_SETREDRAW, FALSE, 0);
-    SendMessageW(v->lines, LVM_DELETEALLITEMS, 0, 0);
-    for (i = 0; i < n; i++) {
+    sig = fnv(sig, &num, sizeof num);
+    if (win->line_fill.have_sig && win->line_fill.sig == sig) return;
+    win->line_fill.sig = sig;
+    win->line_fill.have_sig = 1;
+    SendMessageW(win->lines, WM_SETREDRAW, FALSE, 0);
+    SendMessageW(win->lines, LVM_DELETEALLITEMS, 0, 0);
+    for (idx = 0; idx < num; idx++) {
         char text[200];
-        snprintf(text, sizeof text, "%d-%d", r[i].first, r[i].last);
-        lv_cell(v->lines, i, 0, text);
-        snprintf(text, sizeof text, "%d", r[i].abs_first);
-        lv_cell(v->lines, i, 1, text);
-        lv_cell(v->lines, i, 2, r[i].mode);
-        snprintf(text, sizeof text, "%04X", r[i].name_table);
-        lv_cell(v->lines, i, 3, text);
-        snprintf(text, sizeof text, "%04X", r[i].pattern_table);
-        lv_cell(v->lines, i, 4, text);
-        snprintf(text, sizeof text, "%04X", r[i].colour_table);
-        lv_cell(v->lines, i, 5, text);
-        snprintf(text, sizeof text, "%04X / %04X", r[i].sprite_attr, r[i].sprite_pattern);
-        lv_cell(v->lines, i, 6, text);
-        snprintf(text, sizeof text, "%d", r[i].backdrop);
-        lv_cell(v->lines, i, 7, text);
-        snprintf(text, sizeof text, "%d", r[i].scroll_y);
-        lv_cell(v->lines, i, 8, text);
-        snprintf(text, sizeof text, "%d", r[i].writes);
-        lv_cell(v->lines, i, 9, text);
-        mark_hot(&v->lf, n, i, r[i].writes > 0);
+        snprintf(text, sizeof text, "%d-%d", entry[idx].first, entry[idx].last);
+        lv_cell(win->lines, idx, 0, text);
+        snprintf(text, sizeof text, "%d", entry[idx].abs_first);
+        lv_cell(win->lines, idx, 1, text);
+        lv_cell(win->lines, idx, 2, entry[idx].mode);
+        snprintf(text, sizeof text, "%04X", entry[idx].name_table);
+        lv_cell(win->lines, idx, 3, text);
+        snprintf(text, sizeof text, "%04X", entry[idx].pattern_table);
+        lv_cell(win->lines, idx, 4, text);
+        snprintf(text, sizeof text, "%04X", entry[idx].colour_table);
+        lv_cell(win->lines, idx, 5, text);
+        snprintf(text, sizeof text, "%04X / %04X", entry[idx].sprite_attr, entry[idx].sprite_pattern);
+        lv_cell(win->lines, idx, 6, text);
+        snprintf(text, sizeof text, "%d", entry[idx].backdrop);
+        lv_cell(win->lines, idx, 7, text);
+        snprintf(text, sizeof text, "%d", entry[idx].scroll_y);
+        lv_cell(win->lines, idx, 8, text);
+        snprintf(text, sizeof text, "%d", entry[idx].writes);
+        lv_cell(win->lines, idx, 9, text);
+        mark_hot(&win->line_fill, num, idx, entry[idx].writes > 0);
     }
-    if (n == 0) mark_hot(&v->lf, 0, 0, 0);
-    SendMessageW(v->lines, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(v->lines, NULL, TRUE);
+    if (num == 0) mark_hot(&win->line_fill, 0, 0, 0);
+    SendMessageW(win->lines, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(win->lines, NULL, TRUE);
 }
 
 /* the VRAM section: sixteen rows of the physical VRAM from the controller's base */
-static void fill_vram(vidwin *v)
+static void fill_vram(vidwin *win)
 {
     static char text[4096];
-    msxvid_tab_text(v->tab, MSXVID_S_VRAM, text, (int)sizeof text);
-    set_text(v->vram_view, text);
+    msxvid_tab_text(win->tab, MSXVID_S_VRAM, text, (int)sizeof text);
+    set_text(win->vram_view, text);
     {
         char note[64];
-        snprintf(note, sizeof note, "$%05X", (unsigned)msxvid_tab_vram_base(v->tab));
-        if (!v->vram_note_set) set_text(v->vram_note, note);
+        snprintf(note, sizeof note, "$%05X", (unsigned)msxvid_tab_vram_base(win->tab));
+        if (!win->vram_note_set) set_text(win->vram_note, note);
     }
 }
 
 /* the address box: an address alone scrolls the dump there, an address
  * followed by hex bytes writes them first (the old VDP tab's one field) */
-static void vram_accept(vidwin *v)
+static void vram_accept(vidwin *win)
 {
     uint8_t bytes[POKE_MAX];
     uint32_t vaddr;
     char buf[256], msg[96];
-    int n;
-    GetWindowTextA(v->vram_addr, buf, sizeof buf);
-    n = msxvdp_parse_poke(buf, &vaddr, bytes, POKE_MAX);
-    if (n < 0) {
-        set_text(v->vram_note, "expected: addr [bytes...], e.g. 1800: 41 42");
-        v->vram_note_set = 1;
+    int num;
+    GetWindowTextA(win->vram_addr, buf, sizeof buf);
+    num = msxvdp_parse_poke(buf, &vaddr, bytes, POKE_MAX);
+    if (num < 0) {
+        set_text(win->vram_note, "expected: addr [bytes...], e.g. 1800: 41 42");
+        win->vram_note_set = 1;
         return;
     }
-    if (n > 0) {
-        msxdebug_vdp_write(v->engine, vaddr, bytes, n);
-        snprintf(msg, sizeof msg, "wrote %d byte%s at $%05X", n, n == 1 ? "" : "s", (unsigned)vaddr);
-        SetWindowTextA(v->vram_addr, "");
+    if (num > 0) {
+        msxdebug_vdp_write(win->engine, vaddr, bytes, num);
+        snprintf(msg, sizeof msg, "wrote %d byte%s at $%05X", num, num == 1 ? "" : "s", (unsigned)vaddr);
+        SetWindowTextA(win->vram_addr, "");
     } else {
         snprintf(msg, sizeof msg, "$%05X", (unsigned)vaddr);
     }
-    set_text(v->vram_note, msg);
-    v->vram_note_set = 1;
-    msxvid_tab_set_vram_base(v->tab, vaddr);
-    dbg_video_refresh(v->page, 1);
+    set_text(win->vram_note, msg);
+    win->vram_note_set = 1;
+    msxvid_tab_set_vram_base(win->tab, vaddr);
+    dbg_video_refresh(win->page, 1);
 }
 
-static void fill_timing(vidwin *v)
+static void fill_timing(vidwin *win)
 {
     const char *const *lines;
-    int n = msxvid_tab_timing(v->tab, &lines), i;
+    int num = msxvid_tab_timing(win->tab, &lines), idx;
     char buf[2048];
     size_t len = 0;
     buf[0] = 0;
-    for (i = 0; i < n && len < sizeof buf - 160; i++) {
-        const char *tab = strchr(lines[i], '\t');
-        if (tab) len += (size_t)snprintf(buf + len, sizeof buf - len, "%-14.*s %s\n", (int)(tab - lines[i]), lines[i], tab + 1);
-        else len += (size_t)snprintf(buf + len, sizeof buf - len, "%s\n", lines[i]);
+    for (idx = 0; idx < num && len < sizeof buf - 160; idx++) {
+        const char *tab = strchr(lines[idx], '\t');
+        if (tab) len += (size_t)snprintf(buf + len, sizeof buf - len, "%-14.*s %s\n", (int)(tab - lines[idx]), lines[idx], tab + 1);
+        else len += (size_t)snprintf(buf + len, sizeof buf - len, "%s\n", lines[idx]);
     }
-    if (!n) snprintf(buf, sizeof buf, "No machine");
-    set_text(v->timing, buf);
-    SendMessageW(v->beam, PBM_SETPOS, (WPARAM)msxvid_tab_beam_permille(v->tab), 0);
+    if (!num) snprintf(buf, sizeof buf, "No machine");
+    set_text(win->timing, buf);
+    SendMessageW(win->beam, PBM_SETPOS, (WPARAM)msxvid_tab_beam_permille(win->tab), 0);
 }
 
-static int cur_section(vidwin *v)
+static int cur_section(vidwin *win)
 {
-    int s = (int)SendMessageW(v->sec, TCM_GETCURSEL, 0, 0);
-    return s < 0 ? 0 : s;
+    int sec_index = (int)SendMessageW(win->sec, TCM_GETCURSEL, 0, 0);
+    return sec_index < 0 ? 0 : sec_index;
 }
 
-static void show_section(vidwin *v)
+static void show_section(vidwin *win)
 {
-    int s = cur_section(v);
-    ShowWindow(v->pixel, s == MSXVID_S_PIXEL ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->unpin, s == MSXVID_S_PIXEL ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->regs, s == MSXVID_S_REGISTERS ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->cols, s == MSXVID_S_COLOURS ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->lines, s == MSXVID_S_LINES ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->beam, s == MSXVID_S_TIMING ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->timing, s == MSXVID_S_TIMING ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->vram_title, s == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->vram_addr, s == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->vram_prev, s == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->vram_next, s == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->vram_note, s == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
-    ShowWindow(v->vram_view, s == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
+    int sec_index = cur_section(win);
+    ShowWindow(win->pixel, sec_index == MSXVID_S_PIXEL ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->unpin, sec_index == MSXVID_S_PIXEL ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->regs, sec_index == MSXVID_S_REGISTERS ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->cols, sec_index == MSXVID_S_COLOURS ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->lines, sec_index == MSXVID_S_LINES ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->beam, sec_index == MSXVID_S_TIMING ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->timing, sec_index == MSXVID_S_TIMING ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->vram_title, sec_index == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->vram_addr, sec_index == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->vram_prev, sec_index == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->vram_next, sec_index == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->vram_note, sec_index == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
+    ShowWindow(win->vram_view, sec_index == MSXVID_S_VRAM ? SW_SHOW : SW_HIDE);
 }
 
 /* ---- refresh -------------------------------------------------------------------------- */
 
 #define R_RESET 0x8000u         /* the view or zoom changed: scroll back to the corner */
 
-static void refresh_view(vidwin *v, unsigned what)
+static void refresh_view(vidwin *win, unsigned what)
 {
     if (what & (MSXVID_TAB_PICTURE | MSXVID_TAB_OFF)) {
-        RECT rc;
-        GetClientRect(v->pic, &rc);
-        if (rc.right > 4 && rc.bottom > 4) msxvid_tab_set_viewport(v->tab, rc.right - 2, rc.bottom - 2);
-        if (what & R_RESET) v->scroll_x = v->scroll_y = 0;
-        pic_update_scroll(v);
-        InvalidateRect(v->pic, NULL, FALSE);
+        RECT bounds;
+        GetClientRect(win->pic, &bounds);
+        if (bounds.right > 4 && bounds.bottom > 4) msxvid_tab_set_viewport(win->tab, bounds.right - 2, bounds.bottom - 2);
+        if (what & R_RESET) win->scroll_x = win->scroll_y = 0;
+        pic_update_scroll(win);
+        InvalidateRect(win->pic, NULL, FALSE);
     }
     if (what & MSXVID_TAB_TABLES) {
-        set_text(v->status, msxvid_tab_status(v->tab));
-        switch (cur_section(v)) {
-        case MSXVID_S_REGISTERS: fill_regs(v); break;
-        case MSXVID_S_COLOURS: InvalidateRect(v->cols, NULL, FALSE); break;
-        case MSXVID_S_LINES: fill_lines(v); break;
-        case MSXVID_S_TIMING: fill_timing(v); break;
-        case MSXVID_S_VRAM: fill_vram(v); break;
+        set_text(win->status, msxvid_tab_status(win->tab));
+        switch (cur_section(win)) {
+        case MSXVID_S_REGISTERS: fill_regs(win); break;
+        case MSXVID_S_COLOURS: InvalidateRect(win->cols, NULL, FALSE); break;
+        case MSXVID_S_LINES: fill_lines(win); break;
+        case MSXVID_S_TIMING: fill_timing(win); break;
+        case MSXVID_S_VRAM: fill_vram(win); break;
         default: break;
         }
-        update_pixel(v);
+        update_pixel(win);
     }
 }
 
 void dbg_video_refresh(HWND page, int force)
 {
-    vidwin *v = (vidwin *)GetWindowLongPtrW(page, GWLP_USERDATA);
+    vidwin *win = (vidwin *)GetWindowLongPtrW(page, GWLP_USERDATA);
     unsigned what;
-    if (!v) return;
-    what = msxvid_tab_refresh(v->tab, force);
+    if (!win) return;
+    what = msxvid_tab_refresh(win->tab, force);
     if (force) {
         what |= MSXVID_TAB_PICTURE | MSXVID_TAB_TABLES;
-        v->rf.have_sig = v->lf.have_sig = 0;
+        win->reg_fill.have_sig = win->line_fill.have_sig = 0;
     }
-    refresh_view(v, what);
+    refresh_view(win, what);
 }
 
 /* ---- layout --------------------------------------------------------------------------- */
 
-static int text_w(vidwin *v, HFONT f, const wchar_t *s)
+static int text_w(vidwin *win, HFONT font, const wchar_t *sec_index)
 {
-    HDC dc = GetDC(v->page);
-    HGDIOBJ old = SelectObject(dc, f);
-    SIZE sz;
-    GetTextExtentPoint32W(dc, s, (int)wcslen(s), &sz);
-    SelectObject(dc, old);
-    ReleaseDC(v->page, dc);
-    return sz.cx;
+    HDC device = GetDC(win->page);
+    HGDIOBJ old = SelectObject(device, font);
+    SIZE size;
+    GetTextExtentPoint32W(device, sec_index, (int)wcslen(sec_index), &size);
+    SelectObject(device, old);
+    ReleaseDC(win->page, device);
+    return size.cx;
 }
 
-static void layout(vidwin *v)
+static void layout(vidwin *win)
 {
-    RECT rc, tr;
-    int W, H, rw, lw, x, y, i, row_h = S(v, 24), lh = S(v, 18), gap = S(v, 6), mono_h;
+    RECT bounds, text_rect;
+    int width, height, right_w, left_w, pos_x, pos_y, idx, row_h = scaled(win, 24), line_h = scaled(win, 18), gap = scaled(win, 6), mono_h;
     int right_x, tab_h, top;
-    TEXTMETRICW tm;
-    HDC dc;
-    GetClientRect(v->page, &rc);
-    W = rc.right;
-    H = rc.bottom;
-    if (W < 100 || H < 100) return;
-    dc = GetDC(v->page);
-    SelectObject(dc, v->mono);
-    mono_h = GetTextMetricsW(dc, &tm) ? tm.tmHeight : S(v, 15);
-    ReleaseDC(v->page, dc);
+    TEXTMETRICW metrics;
+    HDC device;
+    GetClientRect(win->page, &bounds);
+    width = bounds.right;
+    height = bounds.bottom;
+    if (width < 100 || height < 100) return;
+    device = GetDC(win->page);
+    SelectObject(device, win->mono);
+    mono_h = GetTextMetricsW(device, &metrics) ? metrics.tmHeight : scaled(win, 15);
+    ReleaseDC(win->page, device);
 
     /* toolbar: View, Zoom, Break on writes; then the overlay checkboxes, flowing */
-    x = 0;
-    y = 0;
-    MoveWindow(v->label_view, x, y + (row_h - lh) / 2, S(v, 36), lh, TRUE);
-    x += S(v, 36);
-    MoveWindow(v->view, x, y, S(v, 110), S(v, 300), TRUE);
-    x += S(v, 110) + gap * 2;
-    MoveWindow(v->label_src, x, y + (row_h - lh) / 2, S(v, 50), lh, TRUE);
-    x += S(v, 50);
-    MoveWindow(v->source, x, y, S(v, 100), S(v, 300), TRUE);
-    x += S(v, 100) + gap * 2;
-    MoveWindow(v->label_bank, x, y + (row_h - lh) / 2, S(v, 36), lh, TRUE);
-    x += S(v, 36);
-    MoveWindow(v->bank, x, y, S(v, 70), S(v, 300), TRUE);
-    x += S(v, 70) + gap * 2;
-    MoveWindow(v->label_zoom, x, y + (row_h - lh) / 2, S(v, 40), lh, TRUE);
-    x += S(v, 40);
-    MoveWindow(v->zoom, x, y, S(v, 80), S(v, 300), TRUE);
-    x += S(v, 80) + gap * 3;
+    pos_x = 0;
+    pos_y = 0;
+    MoveWindow(win->label_view, pos_x, pos_y + (row_h - line_h) / 2, scaled(win, 36), line_h, TRUE);
+    pos_x += scaled(win, 36);
+    MoveWindow(win->view, pos_x, pos_y, scaled(win, 110), scaled(win, 300), TRUE);
+    pos_x += scaled(win, 110) + gap * 2;
+    MoveWindow(win->label_src, pos_x, pos_y + (row_h - line_h) / 2, scaled(win, 50), line_h, TRUE);
+    pos_x += scaled(win, 50);
+    MoveWindow(win->source, pos_x, pos_y, scaled(win, 100), scaled(win, 300), TRUE);
+    pos_x += scaled(win, 100) + gap * 2;
+    MoveWindow(win->label_bank, pos_x, pos_y + (row_h - line_h) / 2, scaled(win, 36), line_h, TRUE);
+    pos_x += scaled(win, 36);
+    MoveWindow(win->bank, pos_x, pos_y, scaled(win, 70), scaled(win, 300), TRUE);
+    pos_x += scaled(win, 70) + gap * 2;
+    MoveWindow(win->label_zoom, pos_x, pos_y + (row_h - line_h) / 2, scaled(win, 40), line_h, TRUE);
+    pos_x += scaled(win, 40);
+    MoveWindow(win->zoom, pos_x, pos_y, scaled(win, 80), scaled(win, 300), TRUE);
+    pos_x += scaled(win, 80) + gap * 3;
     {
-        int bw = text_w(v, v->ui, L"Break on writes") + S(v, 28);
-        MoveWindow(v->brk, x, y - S(v, 1), bw, row_h, TRUE);
+        int button_w = text_w(win, win->ui_font, L"Break on writes") + scaled(win, 28);
+        MoveWindow(win->brk, pos_x, pos_y - scaled(win, 1), button_w, row_h, TRUE);
     }
-    y += row_h + gap;
-    x = 0;
-    for (i = 0; i < v->nov; i++) {
+    pos_y += row_h + gap;
+    pos_x = 0;
+    for (idx = 0; idx < win->nov; idx++) {
         char dummy[1];
         wchar_t lbl[64];
-        int bw;
+        int button_w;
         (void)dummy;
-        GetWindowTextW(v->ov[i], lbl, 64);
-        bw = text_w(v, v->ui, lbl) + S(v, 26);
-        if (x + bw > W && x > 0) {
-            x = 0;
-            y += row_h - S(v, 2);
+        GetWindowTextW(win->overlay_box[idx], lbl, 64);
+        button_w = text_w(win, win->ui_font, lbl) + scaled(win, 26);
+        if (pos_x + button_w > width && pos_x > 0) {
+            pos_x = 0;
+            pos_y += row_h - scaled(win, 2);
         }
-        MoveWindow(v->ov[i], x, y, bw, row_h - S(v, 4), TRUE);
-        x += bw + gap;
+        MoveWindow(win->overlay_box[idx], pos_x, pos_y, button_w, row_h - scaled(win, 4), TRUE);
+        pos_x += button_w + gap;
     }
-    y += row_h;
-    MoveWindow(v->status, 0, y, W, mono_h * 2 + S(v, 4), TRUE);
-    y += mono_h * 2 + S(v, 8);
-    top = y;
+    pos_y += row_h;
+    MoveWindow(win->status, 0, pos_y, width, mono_h * 2 + scaled(win, 4), TRUE);
+    pos_y += mono_h * 2 + scaled(win, 8);
+    top = pos_y;
 
     /* the split: picture left, sections right */
-    rw = S(v, 480);
-    if (rw > W * 50 / 100) rw = W * 48 / 100;
-    lw = W - rw - gap;
-    right_x = lw + gap;
-    MoveWindow(v->pic, 0, top, lw, H - top - lh - gap > 20 ? H - top - lh - gap : 20, TRUE);
-    MoveWindow(v->note, 0, H - lh, W, lh, TRUE);
+    right_w = scaled(win, 480);
+    if (right_w > width * 50 / 100) right_w = width * 48 / 100;
+    left_w = width - right_w - gap;
+    right_x = left_w + gap;
+    MoveWindow(win->pic, 0, top, left_w, height - top - line_h - gap > 20 ? height - top - line_h - gap : 20, TRUE);
+    MoveWindow(win->note, 0, height - line_h, width, line_h, TRUE);
 
-    MoveWindow(v->sec, right_x, top, rw, H - top - lh - gap, TRUE);
-    SetRect(&tr, 0, 0, rw, H - top - lh - gap);
-    SendMessageW(v->sec, TCM_ADJUSTRECT, FALSE, (LPARAM)&tr);
-    tab_h = tr.top;
+    MoveWindow(win->sec, right_x, top, right_w, height - top - line_h - gap, TRUE);
+    SetRect(&text_rect, 0, 0, right_w, height - top - line_h - gap);
+    SendMessageW(win->sec, TCM_ADJUSTRECT, FALSE, (LPARAM)&text_rect);
+    tab_h = text_rect.top;
     {
-        int cx = right_x + S(v, 6), cy = top + tab_h + S(v, 6), cw = rw - S(v, 12);
-        int ch = (H - lh - gap) - cy - S(v, 6);
-        MoveWindow(v->pixel, cx, cy, cw, ch - S(v, 34) > 20 ? ch - S(v, 34) : 20, TRUE);
-        MoveWindow(v->unpin, cx, cy + (ch > S(v, 60) ? ch - S(v, 28) : S(v, 32)), S(v, 80), S(v, 26), TRUE);
-        MoveWindow(v->regs, cx, cy, cw, ch, TRUE);
-        MoveWindow(v->cols, cx, cy, cw, ch, TRUE);
-        MoveWindow(v->lines, cx, cy, cw, ch, TRUE);
-        MoveWindow(v->beam, cx, cy, cw, S(v, 20), TRUE);
-        MoveWindow(v->timing, cx, cy + S(v, 30), cw, ch - S(v, 30), TRUE);
+        int inner_x = right_x + scaled(win, 6), inner_y = top + tab_h + scaled(win, 6), inner_w = right_w - scaled(win, 12);
+        int inner_h = (height - line_h - gap) - inner_y - scaled(win, 6);
+        MoveWindow(win->pixel, inner_x, inner_y, inner_w, inner_h - scaled(win, 34) > 20 ? inner_h - scaled(win, 34) : 20, TRUE);
+        MoveWindow(win->unpin, inner_x, inner_y + (inner_h > scaled(win, 60) ? inner_h - scaled(win, 28) : scaled(win, 32)), scaled(win, 80), scaled(win, 26), TRUE);
+        MoveWindow(win->regs, inner_x, inner_y, inner_w, inner_h, TRUE);
+        MoveWindow(win->cols, inner_x, inner_y, inner_w, inner_h, TRUE);
+        MoveWindow(win->lines, inner_x, inner_y, inner_w, inner_h, TRUE);
+        MoveWindow(win->beam, inner_x, inner_y, inner_w, scaled(win, 20), TRUE);
+        MoveWindow(win->timing, inner_x, inner_y + scaled(win, 30), inner_w, inner_h - scaled(win, 30), TRUE);
         {
-            const int bw = S(v, 32), ah = S(v, 24);
-            MoveWindow(v->vram_title, cx, cy, cw, lh, TRUE);
-            MoveWindow(v->vram_addr, cx, cy + lh + S(v, 2), cw - 2 * bw - S(v, 140) - 3 * gap, ah, TRUE);
-            MoveWindow(v->vram_prev, cx + cw - 2 * bw - S(v, 140) - 2 * gap, cy + lh + S(v, 1), bw, ah + S(v, 2), TRUE);
-            MoveWindow(v->vram_next, cx + cw - bw - S(v, 140) - gap, cy + lh + S(v, 1), bw, ah + S(v, 2), TRUE);
-            MoveWindow(v->vram_note, cx + cw - S(v, 140), cy + lh + S(v, 5), S(v, 140), lh, TRUE);
-            MoveWindow(v->vram_view, cx, cy + lh + ah + S(v, 8), cw, ch - lh - ah - S(v, 8), TRUE);
+            const int button_w = scaled(win, 32), edit_h = scaled(win, 24);
+            MoveWindow(win->vram_title, inner_x, inner_y, inner_w, line_h, TRUE);
+            MoveWindow(win->vram_addr, inner_x, inner_y + line_h + scaled(win, 2), inner_w - 2 * button_w - scaled(win, 140) - 3 * gap, edit_h, TRUE);
+            MoveWindow(win->vram_prev, inner_x + inner_w - 2 * button_w - scaled(win, 140) - 2 * gap, inner_y + line_h + scaled(win, 1), button_w, edit_h + scaled(win, 2), TRUE);
+            MoveWindow(win->vram_next, inner_x + inner_w - button_w - scaled(win, 140) - gap, inner_y + line_h + scaled(win, 1), button_w, edit_h + scaled(win, 2), TRUE);
+            MoveWindow(win->vram_note, inner_x + inner_w - scaled(win, 140), inner_y + line_h + scaled(win, 5), scaled(win, 140), line_h, TRUE);
+            MoveWindow(win->vram_view, inner_x, inner_y + line_h + edit_h + scaled(win, 8), inner_w, inner_h - line_h - edit_h - scaled(win, 8), TRUE);
         }
         {
             static const int rw_[5] = { 100, 70, 56, 52, 520 };
-            for (i = 0; i < 5; i++) SendMessageW(v->regs, LVM_SETCOLUMNWIDTH, (WPARAM)i, S(v, rw_[i]));
+            for (idx = 0; idx < 5; idx++) SendMessageW(win->regs, LVM_SETCOLUMNWIDTH, (WPARAM)idx, scaled(win, rw_[idx]));
         }
         {
             static const int lw_[10] = { 64, 52, 100, 56, 70, 66, 112, 64, 56, 56 };
-            for (i = 0; i < 10; i++) SendMessageW(v->lines, LVM_SETCOLUMNWIDTH, (WPARAM)i, S(v, lw_[i]));
+            for (idx = 0; idx < 10; idx++) SendMessageW(win->lines, LVM_SETCOLUMNWIDTH, (WPARAM)idx, scaled(win, lw_[idx]));
         }
     }
-    pic_update_scroll(v);
+    pic_update_scroll(win);
 }
 
 /* ---- the page -------------------------------------------------------------------------- */
 
-static HWND mk_in(HWND parent, const wchar_t *cls, const wchar_t *text, DWORD style, int id, HFONT font)
+static HWND mk_in(HWND parent, const wchar_t *cls, const wchar_t *text, DWORD style, int ctl_id, HFONT font)
 {
-    HWND h = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, parent, (HMENU)(INT_PTR)id,
+    HWND hwnd = CreateWindowExW(0, cls, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 10, 10, parent, (HMENU)(INT_PTR)ctl_id,
                              (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE), NULL);
-    if (font) SendMessageW(h, WM_SETFONT, (WPARAM)font, TRUE);
-    return h;
+    if (font) SendMessageW(hwnd, WM_SETFONT, (WPARAM)font, TRUE);
+    return hwnd;
 }
 
-#define mk(v, cls, text, style, id, font) mk_in((v)->page, cls, text, style, id, font)
+#define make_child(win, cls, text, style, ctl_id, font) mk_in((win)->page, cls, text, style, ctl_id, font)
 
-static void on_overlay(vidwin *v)
+static void on_overlay(vidwin *win)
 {
-    unsigned m = 0;
-    int i;
-    for (i = 0; i < v->nov; i++)
-        if (SendMessageW(v->ov[i], BM_GETCHECK, 0, 0) == BST_CHECKED) m |= v->ov_bit[i];
-    msxvid_tab_set_overlays(v->tab, m);
-    refresh_view(v, MSXVID_TAB_PICTURE | MSXVID_TAB_TABLES);
+    unsigned mask = 0;
+    int idx;
+    for (idx = 0; idx < win->nov; idx++)
+        if (SendMessageW(win->overlay_box[idx], BM_GETCHECK, 0, 0) == BST_CHECKED) mask |= win->ov_bit[idx];
+    msxvid_tab_set_overlays(win->tab, mask);
+    refresh_view(win, MSXVID_TAB_PICTURE | MSXVID_TAB_TABLES);
 }
 
 /* Enter in the VRAM address box applies it (to the page, which owns the controller). */
 static WNDPROC g_vram_proc;
 
-static LRESULT CALLBACK vram_edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+static LRESULT CALLBACK vram_edit_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    if (msg == WM_KEYDOWN && wp == VK_RETURN) {
-        PostMessageW(GetParent(h), WM_APP + 1, 0, 0);
+    if (msg == WM_KEYDOWN && wparam == VK_RETURN) {
+        PostMessageW(GetParent(hwnd), WM_APP + 1, 0, 0);
         return 0;
     }
-    if (msg == WM_CHAR && (wp == L'\r' || wp == L'\n')) return 0;
-    return CallWindowProcW(g_vram_proc, h, msg, wp, lp);
+    if (msg == WM_CHAR && (wparam == L'\r' || wparam == L'\n')) return 0;
+    return CallWindowProcW(g_vram_proc, hwnd, msg, wparam, lparam);
 }
 
-static LRESULT CALLBACK page_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
+static LRESULT CALLBACK page_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 {
-    vidwin *v = (vidwin *)GetWindowLongPtrW(h, GWLP_USERDATA);
-    if (!v) return DefWindowProcW(h, msg, wp, lp);
+    vidwin *win = (vidwin *)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (!win) return DefWindowProcW(hwnd, msg, wparam, lparam);
     switch (msg) {
     case WM_SIZE:
-        layout(v);
-        refresh_view(v, MSXVID_TAB_PICTURE);
+        layout(win);
+        refresh_view(win, MSXVID_TAB_PICTURE);
         return 0;
     case WM_APP + 1:
-        vram_accept(v);
+        vram_accept(win);
         return 0;
     case WM_COMMAND: {
-        int id = LOWORD(wp), code = HIWORD(wp);
-        if (v->updating) return 0;
-        if (id == IDV_VIEW && code == CBN_SELCHANGE) {
-            msxvid_tab_set_view(v->tab, (int)SendMessageW(v->view, CB_GETCURSEL, 0, 0));
-            dbg_video_refresh(h, 1);
-            v->scroll_x = v->scroll_y = 0;
-            pic_update_scroll(v);
-            enable_choosers(v);
-        } else if (id == IDV_SOURCE && code == CBN_SELCHANGE) {
-            msxvid_tab_set_source(v->tab, (int)SendMessageW(v->source, CB_GETCURSEL, 0, 0));
-            dbg_video_refresh(h, 1);
-            v->scroll_x = v->scroll_y = 0;
-            pic_update_scroll(v);
-            enable_choosers(v);
-        } else if (id == IDV_BANK && code == CBN_SELCHANGE) {
-            msxvid_tab_set_bank(v->tab, (int)SendMessageW(v->bank, CB_GETCURSEL, 0, 0));
-            dbg_video_refresh(h, 1);
-        } else if (id == IDV_VRAM_PREV || id == IDV_VRAM_NEXT) {
-            const uint32_t base = msxvid_tab_vram_base(v->tab);
-            msxvid_tab_set_vram_base(v->tab, id == IDV_VRAM_NEXT ? base + VRAM_STEP : base - VRAM_STEP);
-            v->vram_note_set = 0;
-            dbg_video_refresh(h, 1);
-        } else if (id == IDV_ZOOM && code == CBN_SELCHANGE) {
-            int i = (int)SendMessageW(v->zoom, CB_GETCURSEL, 0, 0);
-            if (i >= 0 && i < v->nzoom) msxvid_tab_set_zoom(v->tab, v->zoom_val[i]);
-            refresh_view(v, MSXVID_TAB_PICTURE | R_RESET);
-        } else if (id >= IDV_OV0 && id < IDV_OV0 + v->nov && code == BN_CLICKED) {
-            on_overlay(v);
-        } else if (id == IDV_BREAK && code == BN_CLICKED) {
-            break_on_pixel(v);
-        } else if (id == IDV_UNPIN && code == BN_CLICKED) {
-            msxvid_tab_unpin(v->tab);
-            InvalidateRect(v->pic, NULL, FALSE);
-            update_pixel(v);
+        int ctl_id = LOWORD(wparam), code = HIWORD(wparam);
+        if (win->updating) return 0;
+        if (ctl_id == IDV_VIEW && code == CBN_SELCHANGE) {
+            msxvid_tab_set_view(win->tab, (int)SendMessageW(win->view, CB_GETCURSEL, 0, 0));
+            dbg_video_refresh(hwnd, 1);
+            win->scroll_x = win->scroll_y = 0;
+            pic_update_scroll(win);
+            enable_choosers(win);
+        } else if (ctl_id == IDV_SOURCE && code == CBN_SELCHANGE) {
+            msxvid_tab_set_source(win->tab, (int)SendMessageW(win->source, CB_GETCURSEL, 0, 0));
+            dbg_video_refresh(hwnd, 1);
+            win->scroll_x = win->scroll_y = 0;
+            pic_update_scroll(win);
+            enable_choosers(win);
+        } else if (ctl_id == IDV_BANK && code == CBN_SELCHANGE) {
+            msxvid_tab_set_bank(win->tab, (int)SendMessageW(win->bank, CB_GETCURSEL, 0, 0));
+            dbg_video_refresh(hwnd, 1);
+        } else if (ctl_id == IDV_VRAM_PREV || ctl_id == IDV_VRAM_NEXT) {
+            const uint32_t base = msxvid_tab_vram_base(win->tab);
+            msxvid_tab_set_vram_base(win->tab, ctl_id == IDV_VRAM_NEXT ? base + VRAM_STEP : base - VRAM_STEP);
+            win->vram_note_set = 0;
+            dbg_video_refresh(hwnd, 1);
+        } else if (ctl_id == IDV_ZOOM && code == CBN_SELCHANGE) {
+            int idx = (int)SendMessageW(win->zoom, CB_GETCURSEL, 0, 0);
+            if (idx >= 0 && idx < win->nzoom) msxvid_tab_set_zoom(win->tab, win->zoom_val[idx]);
+            refresh_view(win, MSXVID_TAB_PICTURE | R_RESET);
+        } else if (ctl_id >= IDV_OV0 && ctl_id < IDV_OV0 + win->nov && code == BN_CLICKED) {
+            on_overlay(win);
+        } else if (ctl_id == IDV_BREAK && code == BN_CLICKED) {
+            break_on_pixel(win);
+        } else if (ctl_id == IDV_UNPIN && code == BN_CLICKED) {
+            msxvid_tab_unpin(win->tab);
+            InvalidateRect(win->pic, NULL, FALSE);
+            update_pixel(win);
         }
         return 0;
     }
     case WM_NOTIFY: {
-        NMHDR *nh = (NMHDR *)lp;
-        if (nh->idFrom == IDV_SEC && nh->code == TCN_SELCHANGE) {
-            show_section(v);
-            refresh_view(v, MSXVID_TAB_TABLES);
-        } else if ((nh->idFrom == IDV_REGS || nh->idFrom == IDV_LINES) && nh->code == NM_CUSTOMDRAW) {
-            NMLVCUSTOMDRAW *cd = (NMLVCUSTOMDRAW *)lp;
-            listfill *lf = nh->idFrom == IDV_REGS ? &v->rf : &v->lf;
-            if (cd->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-            if (cd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
-                int i = (int)cd->nmcd.dwItemSpec;
-                if (i >= 0 && i < lf->nhot && lf->hot[i]) {
-                    if (nh->idFrom == IDV_REGS) {       /* a register that just changed: the accent */
-                        cd->clrTextBk = ACCENT;
-                        cd->clrText = ACCENT_INK;
+        NMHDR *nmhdr = (NMHDR *)lparam;
+        if (nmhdr->idFrom == IDV_SEC && nmhdr->code == TCN_SELCHANGE) {
+            show_section(win);
+            refresh_view(win, MSXVID_TAB_TABLES);
+        } else if ((nmhdr->idFrom == IDV_REGS || nmhdr->idFrom == IDV_LINES) && nmhdr->code == NM_CUSTOMDRAW) {
+            NMLVCUSTOMDRAW *custom = (NMLVCUSTOMDRAW *)lparam;
+            listfill *line_fill = nmhdr->idFrom == IDV_REGS ? &win->reg_fill : &win->line_fill;
+            if (custom->nmcd.dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (custom->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                int idx = (int)custom->nmcd.dwItemSpec;
+                if (idx >= 0 && idx < line_fill->nhot && line_fill->hot[idx]) {
+                    if (nmhdr->idFrom == IDV_REGS) {       /* a register that just changed: the accent */
+                        custom->clrTextBk = ACCENT;
+                        custom->clrText = ACCENT_INK;
                     } else {                            /* a line where something changed */
-                        cd->clrTextBk = RGB(0xDD, 0xEE, 0xD5);
-                        cd->clrText = RGB(0, 0, 0);
+                        custom->clrTextBk = RGB(0xDD, 0xEE, 0xD5);
+                        custom->clrText = RGB(0, 0, 0);
                     }
                 }
                 return CDRF_DODEFAULT;
@@ -939,207 +939,207 @@ static LRESULT CALLBACK page_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_CTLCOLORSTATIC: {
         /* the read-only labels sit on the page colour */
-        HDC dc = (HDC)wp;
-        if ((HWND)lp == v->vram_view) {      /* the hex dump reads on the window colour, like the other text views */
-            SetBkColor(dc, GetSysColor(COLOR_WINDOW));
-            SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+        HDC device = (HDC)wparam;
+        if ((HWND)lparam == win->vram_view) {      /* the hex dump reads on the window colour, like the other text views */
+            SetBkColor(device, GetSysColor(COLOR_WINDOW));
+            SetTextColor(device, GetSysColor(COLOR_WINDOWTEXT));
             return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
         }
-        SetBkColor(dc, GetSysColor(COLOR_BTNFACE));
-        SetTextColor(dc, GetSysColor(COLOR_BTNTEXT));
+        SetBkColor(device, GetSysColor(COLOR_BTNFACE));
+        SetTextColor(device, GetSysColor(COLOR_BTNTEXT));
         return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
     }
     case WM_DESTROY:
-        msxvid_tab_free(v->tab);
-        free(v->rf.hot);
-        free(v->lf.hot);
-        free(v);
-        SetWindowLongPtrW(h, GWLP_USERDATA, 0);
+        msxvid_tab_free(win->tab);
+        free(win->reg_fill.hot);
+        free(win->line_fill.hot);
+        free(win);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         return 0;
     default:
         break;
     }
-    return DefWindowProcW(h, msg, wp, lp);
+    return DefWindowProcW(hwnd, msg, wparam, lparam);
 }
 
 static void register_classes(HINSTANCE inst)
 {
     static int done;
-    WNDCLASSW wc;
+    WNDCLASSW wndclass;
     if (done) return;
     done = 1;
-    memset(&wc, 0, sizeof wc);
-    wc.lpfnWndProc = page_proc;
-    wc.hInstance = inst;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
-    wc.lpszClassName = PAGE_CLASS;
-    RegisterClassW(&wc);
-    wc.lpfnWndProc = pic_proc;
-    wc.lpszClassName = PIC_CLASS;
-    wc.hbrBackground = NULL;
-    wc.hCursor = LoadCursor(NULL, IDC_CROSS);
-    wc.style = CS_DBLCLKS;
-    RegisterClassW(&wc);
-    wc.lpfnWndProc = col_proc;
-    wc.lpszClassName = COL_CLASS;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.style = 0;
-    RegisterClassW(&wc);
+    memset(&wndclass, 0, sizeof wndclass);
+    wndclass.lpfnWndProc = page_proc;
+    wndclass.hInstance = inst;
+    wndclass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wndclass.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
+    wndclass.lpszClassName = PAGE_CLASS;
+    RegisterClassW(&wndclass);
+    wndclass.lpfnWndProc = pic_proc;
+    wndclass.lpszClassName = PIC_CLASS;
+    wndclass.hbrBackground = NULL;
+    wndclass.hCursor = LoadCursor(NULL, IDC_CROSS);
+    wndclass.style = CS_DBLCLKS;
+    RegisterClassW(&wndclass);
+    wndclass.lpfnWndProc = col_proc;
+    wndclass.lpszClassName = COL_CLASS;
+    wndclass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wndclass.style = 0;
+    RegisterClassW(&wndclass);
 }
 
-static HWND mk_list(vidwin *v, int id, const wchar_t *const *names, int n)
+static HWND mk_list(vidwin *win, int ctl_id, const wchar_t *const *names, int num)
 {
-    HWND lv = mk(v, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
-                 id, v->mono);
+    HWND list_view = make_child(win, WC_LISTVIEWW, L"", LVS_REPORT | LVS_SINGLESEL | LVS_NOSORTHEADER | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP,
+                 ctl_id, win->mono);
     LVCOLUMNW col;
-    int i;
-    SendMessageW(lv, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER,
+    int idx;
+    SendMessageW(list_view, LVM_SETEXTENDEDLISTVIEWSTYLE, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER,
                  LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
     memset(&col, 0, sizeof col);
     col.mask = LVCF_TEXT | LVCF_WIDTH;
-    for (i = 0; i < n; i++) {
-        col.pszText = (LPWSTR)names[i];
+    for (idx = 0; idx < num; idx++) {
+        col.pszText = (LPWSTR)names[idx];
         col.cx = 80;
-        SendMessageW(lv, LVM_INSERTCOLUMNW, (WPARAM)i, (LPARAM)&col);
+        SendMessageW(list_view, LVM_INSERTCOLUMNW, (WPARAM)idx, (LPARAM)&col);
     }
-    return lv;
+    return list_view;
 }
 
-HWND dbg_video_create(HWND parent, msxdebug *engine, HFONT ui, HFONT mono, int dpi)
+HWND dbg_video_create(HWND parent, msxdebug *engine, HFONT ui_font, HFONT mono, int dpi)
 {
     HINSTANCE inst = (HINSTANCE)GetWindowLongPtrW(parent, GWLP_HINSTANCE);
-    vidwin *v = calloc(1, sizeof *v);
-    int n, i;
-    const msxvid_overlay_info *od;
-    const int *zv;
+    vidwin *win = calloc(1, sizeof *win);
+    int num, idx;
+    const msxvid_overlay_info *overlay_defs;
+    const int *zoom_values;
     TCITEMW item;
     static const wchar_t *const regcols[5] = { L"Register", L"Value", L"Writes", L"Line", L"Meaning" };
     static const wchar_t *const linecols[10] = { L"Lines", L"Frame", L"Mode", L"Names", L"Patterns", L"Colours", L"Sprites",
                                                  L"Backdrop", L"Scroll", L"Writes" };
-    if (!v) return NULL;
+    if (!win) return NULL;
     register_classes(inst);
-    v->ui = ui;
-    v->mono = mono;
-    v->engine = engine;
-    v->dpi = dpi > 0 ? dpi : 96;
-    v->pal_hover = -1;
-    v->tab = msxvid_tab_new(engine);
-    if (!v->tab) {
-        free(v);
+    win->ui_font = ui_font;
+    win->mono = mono;
+    win->engine = engine;
+    win->dpi = dpi > 0 ? dpi : 96;
+    win->pal_hover = -1;
+    win->tab = msxvid_tab_new(engine);
+    if (!win->tab) {
+        free(win);
         return NULL;
     }
-    memset(&v->bmi, 0, sizeof v->bmi);
-    v->bmi.bmiHeader.biSize = sizeof v->bmi.bmiHeader;
-    v->bmi.bmiHeader.biPlanes = 1;
-    v->bmi.bmiHeader.biBitCount = 32;
-    v->bmi.bmiHeader.biCompression = BI_RGB;
-    v->page = CreateWindowExW(0, PAGE_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 10, 10, parent,
+    memset(&win->bmi, 0, sizeof win->bmi);
+    win->bmi.bmiHeader.biSize = sizeof win->bmi.bmiHeader;
+    win->bmi.bmiHeader.biPlanes = 1;
+    win->bmi.bmiHeader.biBitCount = 32;
+    win->bmi.bmiHeader.biCompression = BI_RGB;
+    win->page = CreateWindowExW(0, PAGE_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, 0, 0, 10, 10, parent,
                               NULL, inst, NULL);
-    SetWindowLongPtrW(v->page, GWLP_USERDATA, (LONG_PTR)v);
+    SetWindowLongPtrW(win->page, GWLP_USERDATA, (LONG_PTR)win);
 
-    v->label_view = mk(v, L"STATIC", L"View", SS_LEFT, IDV_LABEL_VIEW, ui);
-    v->view = mk(v, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDV_VIEW, ui);
-    for (i = 0; i < MSXVID_V_COUNT; i++) {
-        wchar_t *w = wide(msxvid_view_name(i));
-        SendMessageW(v->view, CB_ADDSTRING, 0, (LPARAM)w);
-        free(w);
+    win->label_view = make_child(win, L"STATIC", L"View", SS_LEFT, IDV_LABEL_VIEW, ui_font);
+    win->view = make_child(win, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDV_VIEW, ui_font);
+    for (idx = 0; idx < MSXVID_V_COUNT; idx++) {
+        wchar_t *wtext = wide(msxvid_view_name(idx));
+        SendMessageW(win->view, CB_ADDSTRING, 0, (LPARAM)wtext);
+        free(wtext);
     }
-    v->label_src = mk(v, L"STATIC", L"Source", SS_LEFT, IDV_LABEL_SRC, ui);
-    v->source = mk(v, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDV_SOURCE, ui);
-    for (i = 0; i < MSXVID_SRC_COUNT; i++) {
-        wchar_t *w = wide(msxvid_source_name(i));
-        SendMessageW(v->source, CB_ADDSTRING, 0, (LPARAM)w);
-        free(w);
+    win->label_src = make_child(win, L"STATIC", L"Source", SS_LEFT, IDV_LABEL_SRC, ui_font);
+    win->source = make_child(win, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDV_SOURCE, ui_font);
+    for (idx = 0; idx < MSXVID_SRC_COUNT; idx++) {
+        wchar_t *wtext = wide(msxvid_source_name(idx));
+        SendMessageW(win->source, CB_ADDSTRING, 0, (LPARAM)wtext);
+        free(wtext);
     }
-    v->label_bank = mk(v, L"STATIC", L"Bank", SS_LEFT, IDV_LABEL_BANK, ui);
-    v->bank = mk(v, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDV_BANK, ui);
-    SendMessageW(v->bank, CB_ADDSTRING, 0, (LPARAM)L"0");
-    SendMessageW(v->bank, CB_ADDSTRING, 0, (LPARAM)L"1");
-    SendMessageW(v->bank, CB_ADDSTRING, 0, (LPARAM)L"2");
-    v->label_zoom = mk(v, L"STATIC", L"Zoom", SS_LEFT, IDV_LABEL_ZOOM, ui);
-    v->zoom = mk(v, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDV_ZOOM, ui);
-    zv = msxvid_zooms(&n);
-    for (i = 0; i < n && i < MAX_ZOOMS; i++) {
+    win->label_bank = make_child(win, L"STATIC", L"Bank", SS_LEFT, IDV_LABEL_BANK, ui_font);
+    win->bank = make_child(win, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDV_BANK, ui_font);
+    SendMessageW(win->bank, CB_ADDSTRING, 0, (LPARAM)L"0");
+    SendMessageW(win->bank, CB_ADDSTRING, 0, (LPARAM)L"1");
+    SendMessageW(win->bank, CB_ADDSTRING, 0, (LPARAM)L"2");
+    win->label_zoom = make_child(win, L"STATIC", L"Zoom", SS_LEFT, IDV_LABEL_ZOOM, ui_font);
+    win->zoom = make_child(win, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, IDV_ZOOM, ui_font);
+    zoom_values = msxvid_zooms(&num);
+    for (idx = 0; idx < num && idx < MAX_ZOOMS; idx++) {
         wchar_t lbl[16];
-        v->zoom_val[v->nzoom++] = zv[i];
-        if (zv[i] == 0) wcscpy(lbl, L"Fit");
-        else swprintf(lbl, 16, L"%d\u00d7", zv[i]);
-        SendMessageW(v->zoom, CB_ADDSTRING, 0, (LPARAM)lbl);
+        win->zoom_val[win->nzoom++] = zoom_values[idx];
+        if (zoom_values[idx] == 0) wcscpy(lbl, L"Fit");
+        else swprintf(lbl, 16, L"%d\u00d7", zoom_values[idx]);
+        SendMessageW(win->zoom, CB_ADDSTRING, 0, (LPARAM)lbl);
     }
-    v->brk = mk(v, L"BUTTON", L"Break on writes", BS_PUSHBUTTON | WS_TABSTOP, IDV_BREAK, ui);
-    od = msxvid_overlays(&n);
-    for (i = 0; i < n && i < MAX_OVERLAYS; i++) {
-        wchar_t *w = wide(od[i].label);
-        v->ov[i] = mk(v, L"BUTTON", w, BS_AUTOCHECKBOX | WS_TABSTOP, IDV_OV0 + i, ui);
-        v->ov_bit[i] = od[i].bit;
-        v->nov++;
-        free(w);
+    win->brk = make_child(win, L"BUTTON", L"Break on writes", BS_PUSHBUTTON | WS_TABSTOP, IDV_BREAK, ui_font);
+    overlay_defs = msxvid_overlays(&num);
+    for (idx = 0; idx < num && idx < MAX_OVERLAYS; idx++) {
+        wchar_t *wtext = wide(overlay_defs[idx].label);
+        win->overlay_box[idx] = make_child(win, L"BUTTON", wtext, BS_AUTOCHECKBOX | WS_TABSTOP, IDV_OV0 + idx, ui_font);
+        win->ov_bit[idx] = overlay_defs[idx].bit;
+        win->nov++;
+        free(wtext);
     }
-    v->status = mk(v, L"STATIC", L"", SS_LEFT | SS_NOPREFIX, IDV_STATUS, mono);
-    v->pic = CreateWindowExW(WS_EX_CLIENTEDGE, PIC_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_HSCROLL | WS_VSCROLL, 0, 0, 10, 10,
-                             v->page, (HMENU)(INT_PTR)IDV_PIC, inst, NULL);
-    SetWindowLongPtrW(v->pic, GWLP_USERDATA, (LONG_PTR)v);
-    v->note = mk(v, L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDV_NOTE, ui);
+    win->status = make_child(win, L"STATIC", L"", SS_LEFT | SS_NOPREFIX, IDV_STATUS, mono);
+    win->pic = CreateWindowExW(WS_EX_CLIENTEDGE, PIC_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_HSCROLL | WS_VSCROLL, 0, 0, 10, 10,
+                             win->page, (HMENU)(INT_PTR)IDV_PIC, inst, NULL);
+    SetWindowLongPtrW(win->pic, GWLP_USERDATA, (LONG_PTR)win);
+    win->note = make_child(win, L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDV_NOTE, ui_font);
 
-    v->sec = mk(v, WC_TABCONTROLW, L"", WS_CLIPSIBLINGS | WS_TABSTOP, IDV_SEC, ui);
+    win->sec = make_child(win, WC_TABCONTROLW, L"", WS_CLIPSIBLINGS | WS_TABSTOP, IDV_SEC, ui_font);
     memset(&item, 0, sizeof item);
     item.mask = TCIF_TEXT;
-    for (i = 0; i < MSXVID_S_COUNT; i++) {
-        wchar_t *w = wide(msxvid_section_name(i));
-        item.pszText = w;
-        SendMessageW(v->sec, TCM_INSERTITEMW, (WPARAM)i, (LPARAM)&item);
-        free(w);
+    for (idx = 0; idx < MSXVID_S_COUNT; idx++) {
+        wchar_t *wtext = wide(msxvid_section_name(idx));
+        item.pszText = wtext;
+        SendMessageW(win->sec, TCM_INSERTITEMW, (WPARAM)idx, (LPARAM)&item);
+        free(wtext);
     }
-    SetWindowPos(v->sec, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);   /* under the section controls */
-    v->pixel = mk(v, L"STATIC", L"", SS_LEFT | SS_NOPREFIX, IDV_PIXEL, mono);
-    v->unpin = mk(v, L"BUTTON", L"Unpin", BS_PUSHBUTTON | WS_TABSTOP, IDV_UNPIN, ui);
-    v->regs = mk_list(v, IDV_REGS, regcols, 5);
-    v->lines = mk_list(v, IDV_LINES, linecols, 10);
-    v->cols = CreateWindowExW(0, COL_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, 10, 10, v->page,
+    SetWindowPos(win->sec, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);   /* under the section controls */
+    win->pixel = make_child(win, L"STATIC", L"", SS_LEFT | SS_NOPREFIX, IDV_PIXEL, mono);
+    win->unpin = make_child(win, L"BUTTON", L"Unpin", BS_PUSHBUTTON | WS_TABSTOP, IDV_UNPIN, ui_font);
+    win->regs = mk_list(win, IDV_REGS, regcols, 5);
+    win->lines = mk_list(win, IDV_LINES, linecols, 10);
+    win->cols = CreateWindowExW(0, COL_CLASS, L"", WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, 10, 10, win->page,
                               (HMENU)(INT_PTR)IDV_COLS, inst, NULL);
-    SetWindowLongPtrW(v->cols, GWLP_USERDATA, (LONG_PTR)v);
-    v->beam = mk(v, PROGRESS_CLASSW, L"", PBS_SMOOTH, IDV_BEAM, NULL);
-    SendMessageW(v->beam, PBM_SETRANGE32, 0, 1000);
-    v->timing = mk(v, L"STATIC", L"", SS_LEFT | SS_NOPREFIX, IDV_TIMING, mono);
-    v->vram_title = mk(v, L"STATIC", L"Physical VRAM (Enter writes; addr [bytes...])", SS_LEFT | SS_NOPREFIX, IDV_VRAM_TITLE, ui);
-    v->vram_addr = mk(v, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, IDV_VRAM_ADDR, mono);
-    SendMessageW(v->vram_addr, EM_SETCUEBANNER, TRUE, (LPARAM)L"1800: 41 42");
-    g_vram_proc = (WNDPROC)SetWindowLongPtrW(v->vram_addr, GWLP_WNDPROC, (LONG_PTR)vram_edit_proc);
-    v->vram_prev = mk(v, L"BUTTON", L"<", BS_PUSHBUTTON | WS_TABSTOP, IDV_VRAM_PREV, ui);
-    v->vram_next = mk(v, L"BUTTON", L">", BS_PUSHBUTTON | WS_TABSTOP, IDV_VRAM_NEXT, ui);
-    v->vram_note = mk(v, L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDV_VRAM_NOTE, ui);
-    v->vram_view = mk(v, L"EDIT", L"", WS_BORDER | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
+    SetWindowLongPtrW(win->cols, GWLP_USERDATA, (LONG_PTR)win);
+    win->beam = make_child(win, PROGRESS_CLASSW, L"", PBS_SMOOTH, IDV_BEAM, NULL);
+    SendMessageW(win->beam, PBM_SETRANGE32, 0, 1000);
+    win->timing = make_child(win, L"STATIC", L"", SS_LEFT | SS_NOPREFIX, IDV_TIMING, mono);
+    win->vram_title = make_child(win, L"STATIC", L"Physical VRAM (Enter writes; addr [bytes...])", SS_LEFT | SS_NOPREFIX, IDV_VRAM_TITLE, ui_font);
+    win->vram_addr = make_child(win, L"EDIT", L"", WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP, IDV_VRAM_ADDR, mono);
+    SendMessageW(win->vram_addr, EM_SETCUEBANNER, TRUE, (LPARAM)L"1800: 41 42");
+    g_vram_proc = (WNDPROC)SetWindowLongPtrW(win->vram_addr, GWLP_WNDPROC, (LONG_PTR)vram_edit_proc);
+    win->vram_prev = make_child(win, L"BUTTON", L"<", BS_PUSHBUTTON | WS_TABSTOP, IDV_VRAM_PREV, ui_font);
+    win->vram_next = make_child(win, L"BUTTON", L">", BS_PUSHBUTTON | WS_TABSTOP, IDV_VRAM_NEXT, ui_font);
+    win->vram_note = make_child(win, L"STATIC", L"", SS_LEFT | SS_NOPREFIX | SS_ENDELLIPSIS, IDV_VRAM_NOTE, ui_font);
+    win->vram_view = make_child(win, L"EDIT", L"", WS_BORDER | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
                       IDV_VRAM_VIEW, mono);
 
     /* start from the controller's state (the MSX_DEBUGGER_VIDEO_* variables) */
-    v->updating = 1;
-    SendMessageW(v->view, CB_SETCURSEL, (WPARAM)msxvid_tab_view(v->tab), 0);
-    SendMessageW(v->source, CB_SETCURSEL, (WPARAM)msxvid_tab_source(v->tab), 0);
-    SendMessageW(v->bank, CB_SETCURSEL, (WPARAM)msxvid_tab_bank(v->tab), 0);
-    enable_choosers(v);
-    for (i = 0; i < v->nzoom; i++)
-        if (v->zoom_val[i] == msxvid_tab_zoom(v->tab)) SendMessageW(v->zoom, CB_SETCURSEL, (WPARAM)i, 0);
-    for (i = 0; i < v->nov; i++)
-        SendMessageW(v->ov[i], BM_SETCHECK, (msxvid_tab_overlays(v->tab) & v->ov_bit[i]) ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(v->sec, TCM_SETCURSEL, (WPARAM)msxvid_tab_env_section(v->tab), 0);
-    v->updating = 0;
-    show_section(v);
-    return v->page;
+    win->updating = 1;
+    SendMessageW(win->view, CB_SETCURSEL, (WPARAM)msxvid_tab_view(win->tab), 0);
+    SendMessageW(win->source, CB_SETCURSEL, (WPARAM)msxvid_tab_source(win->tab), 0);
+    SendMessageW(win->bank, CB_SETCURSEL, (WPARAM)msxvid_tab_bank(win->tab), 0);
+    enable_choosers(win);
+    for (idx = 0; idx < win->nzoom; idx++)
+        if (win->zoom_val[idx] == msxvid_tab_zoom(win->tab)) SendMessageW(win->zoom, CB_SETCURSEL, (WPARAM)idx, 0);
+    for (idx = 0; idx < win->nov; idx++)
+        SendMessageW(win->overlay_box[idx], BM_SETCHECK, (msxvid_tab_overlays(win->tab) & win->ov_bit[idx]) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(win->sec, TCM_SETCURSEL, (WPARAM)msxvid_tab_env_section(win->tab), 0);
+    win->updating = 0;
+    show_section(win);
+    return win->page;
 }
 
-void dbg_video_place(HWND page, int x, int y, int w, int h)
+void dbg_video_place(HWND page, int pos_x, int pos_y, int width, int height)
 {
-    MoveWindow(page, x, y, w > 1 ? w : 1, h > 1 ? h : 1, TRUE);
+    MoveWindow(page, pos_x, pos_y, width > 1 ? width : 1, height > 1 ? height : 1, TRUE);
 }
 
-void dbg_video_fonts(HWND page, HFONT ui, HFONT mono, int dpi)
+void dbg_video_fonts(HWND page, HFONT ui_font, HFONT mono, int dpi)
 {
-    vidwin *v = (vidwin *)GetWindowLongPtrW(page, GWLP_USERDATA);
-    if (!v) return;
-    v->ui = ui;
-    v->mono = mono;
-    v->dpi = dpi > 0 ? dpi : 96;
-    layout(v);
-    InvalidateRect(v->page, NULL, TRUE);
+    vidwin *win = (vidwin *)GetWindowLongPtrW(page, GWLP_USERDATA);
+    if (!win) return;
+    win->ui_font = ui_font;
+    win->mono = mono;
+    win->dpi = dpi > 0 ? dpi : 96;
+    layout(win);
+    InvalidateRect(win->page, NULL, TRUE);
 }

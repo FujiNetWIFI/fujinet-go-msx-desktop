@@ -24,29 +24,29 @@
  * app.manifest.in): on = its state; the accent fill with the ink while it is
  * on, the themed look while it is off. The result is what the parent's
  * WM_NOTIFY should return. */
-static inline LRESULT msx_accent_customdraw(const NMCUSTOMDRAW *cd, int on)
+static inline LRESULT msx_accent_customdraw(const NMCUSTOMDRAW *draw, int on)
 {
     static HBRUSH accent;
     char text[64];
-    RECT r;
-    if (cd->dwDrawStage != CDDS_PREPAINT || !on) return CDRF_DODEFAULT;
+    RECT area;
+    if (draw->dwDrawStage != CDDS_PREPAINT || !on) return CDRF_DODEFAULT;
     if (!accent) accent = CreateSolidBrush(MSX_ACCENT_COLORREF);
-    r = cd->rc;
-    FillRect(cd->hdc, &r, accent);
-    FrameRect(cd->hdc, &r, (HBRUSH)GetStockObject(GRAY_BRUSH));
-    SetBkMode(cd->hdc, TRANSPARENT);
-    SetTextColor(cd->hdc, MSX_ACCENT_INK_COLORREF);
+    area = draw->rc;
+    FillRect(draw->hdc, &area, accent);
+    FrameRect(draw->hdc, &area, (HBRUSH)GetStockObject(GRAY_BRUSH));
+    SetBkMode(draw->hdc, TRANSPARENT);
+    SetTextColor(draw->hdc, MSX_ACCENT_INK_COLORREF);
     text[0] = '\0';
-    GetWindowTextA(cd->hdr.hwndFrom, text, sizeof text);
+    GetWindowTextA(draw->hdr.hwndFrom, text, sizeof text);
     {
-        HFONT f = (HFONT)SendMessageA(cd->hdr.hwndFrom, WM_GETFONT, 0, 0);
-        HGDIOBJ old = f ? SelectObject(cd->hdc, f) : NULL;
-        DrawTextA(cd->hdc, text, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-        if (old) SelectObject(cd->hdc, old);
+        HFONT font = (HFONT)SendMessageA(draw->hdr.hwndFrom, WM_GETFONT, 0, 0);
+        HGDIOBJ old = font ? SelectObject(draw->hdc, font) : NULL;
+        DrawTextA(draw->hdc, text, -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (old) SelectObject(draw->hdc, old);
     }
-    if (GetFocus() == cd->hdr.hwndFrom) {
-        InflateRect(&r, -3, -3);
-        DrawFocusRect(cd->hdc, &r);
+    if (GetFocus() == draw->hdr.hwndFrom) {
+        InflateRect(&area, -3, -3);
+        DrawFocusRect(draw->hdc, &area);
     }
     return CDRF_SKIPDEFAULT;
 }

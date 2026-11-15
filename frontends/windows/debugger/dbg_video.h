@@ -14,12 +14,12 @@
 #include "msxdebug.h"
 
 /* The tab's page, a child of `parent`. ui and mono are the fonts it uses. */
-HWND dbg_video_create(HWND parent, msxdebug *engine, HFONT ui, HFONT mono, int dpi);
+HWND dbg_video_create(HWND parent, msxdebug *engine, HFONT ui_font, HFONT mono, int dpi);
 /* Move and size the page (it lays out its own controls). */
-void dbg_video_place(HWND page, int x, int y, int w, int h);
+void dbg_video_place(HWND page, int pos_x, int pos_y, int width, int height);
 /* Take a snapshot and redraw what changed (force: everything). Cheap to call every tick. */
 void dbg_video_refresh(HWND page, int force);
 /* The debugger's fonts or DPI changed. */
-void dbg_video_fonts(HWND page, HFONT ui, HFONT mono, int dpi);
+void dbg_video_fonts(HWND page, HFONT ui_font, HFONT mono, int dpi);
 
 #endif
