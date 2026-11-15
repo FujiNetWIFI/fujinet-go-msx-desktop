@@ -20,6 +20,7 @@ add_executable(fujinet-go-msx-macos MACOSX_BUNDLE
   DisplayView.m
   help/HelpWindow.m
   debugger/DebuggerWindow.m
+  debugger/VideoTab.m
   ${MACOS_ICON}
 )
 set_target_properties(fujinet-go-msx-macos PROPERTIES

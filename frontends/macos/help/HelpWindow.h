@@ -11,7 +11,7 @@
 
 @interface MsxHelpWindow : NSObject <NSUserInterfaceItemSearching>
 + (MsxHelpWindow *)shared;
-/* Shows the Help at ident: a heading's slug or a context ("debugger/cpu",
+/* Shows the Help at ident: a heading's slug or a context ("debugger/memory",
  * "prefs/Machine"), or "?words" to search; nil stays where it was. */
 - (void)showAt:(NSString *)ident;
 /* The Help for what window shows (in the Help, its search). */
