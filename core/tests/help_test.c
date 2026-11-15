@@ -26,8 +26,9 @@ static const char *const platform_names[] = { "GNOME", "KDE", "Windows", "macOS"
 /* What the frontends' Help buttons and menus open. */
 static const char *const contexts[] = {
     "main", "fujilog", "prefs/FujiNet", "prefs/Connection",
-    "debugger/console", "debugger/cpu", "debugger/disassembly", "debugger/vdp",
-    "debugger/breakpoints", "debugger/io", "debugger/fujinet",
+    "debugger/console", "debugger/disassembly", "debugger/memory", "debugger/breakpoints",
+    "debugger/watches", "debugger/cart", "debugger/trace", "debugger/history", "debugger/video",
+    "debugger/sound", "debugger/symbols", "debugger/fujinet",
 };
 
 /* The Preferences labels, as the frontends show them. */
@@ -174,10 +175,12 @@ static void
 check_debugger(int p)
 {
     static const char *const words[] = { "Run or Stop", "Step Over", "Step Out", "Frame", "Run to Cursor",
-                                         "Load Symbols", "seven tabs", "Follow PC" };
+                                         "Load Symbols", "twelve tabs", "Follow PC", "Pop Out",
+                                         "Display", "Decoded", "Beam", "Values", "Zoom", "Fit", "Overlays", "Pixel", "Registers",
+                                         "Colours", "Lines", "Timing", "Break on writes", "Poke", "Record" };
     static const char *const commands[] = { "step", "over", "out", "run", "stop", "frame", "runto", "break", "bpr",
-                                            "bpw", "bpin", "bpout", "delete", "enable", "clear", "regs", "mem",
-                                            "poke", "disasm", "label", "labels" };
+                                            "bpw", "bpa", "bpin", "bpout", "delete", "enable", "clear", "print", "regs", "set", "mem",
+                                            "poke", "disasm", "find", "watch", "unwatch", "trace", "cart", "video", "label", "labels" };
     int t, b;
 
     for (size_t k = 0; k < sizeof words / sizeof *words; k++)

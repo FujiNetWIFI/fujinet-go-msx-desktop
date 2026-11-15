@@ -237,7 +237,7 @@ Each setting above names its key. The others are `machine` (the machine's id) an
 # Debugger
 
 The Debugger (<kbd>F12</kbd>) stops the machine and shows what it is doing, over
-openMSX's own debug interface. It has seven tabs; closing it lets the machine go
+openMSX's own debug interface. It has twelve tabs; closing it lets the machine go
 on as it was. Opening it stops the machine.
 
 | Button | Does |
@@ -249,16 +249,24 @@ on as it was. Opening it stops the machine.
 | Frame (<kbd>Shift+F7</kbd>) | Runs to the next VDP interrupt |
 | Run to Cursor | On to the selected line |
 | Load Symbols | Reads a symbol file |
+| Pop Out | Moves the tab that shows into a window of its own; **Dock** puts it back |
 | Help | Opens the topic of the tab that shows |
+
+The Z80's registers and flags are in the strip under every tab: click one, type
+a new value and press Enter while the machine is stopped.
 
 <!-- context: debugger/console -->
 ## Console
 
 The Console takes short commands, or any of openMSX's own Tcl commands, with
 history and completion on <kbd>Tab</kbd>. Addresses are `$C000`, `0xC000`,
-`C000h`, decimal or a label. A breakpoint's condition is a Tcl expression, for
-example `[reg A] == 5`. `help` lists the commands; anything else goes to openMSX's
-Tcl console (`debug list`, `reg A 5`, `slotmap`, and so on).
+`C000h`, decimal or a label, and expressions work: registers (`a`, `hl`, `sp`),
+flags, `[addr]` for a byte, `{addr}` for a word, labels, `frame` and `cycles`. A
+breakpoint's condition is such an expression, for example `a == 5`, and on a
+watchpoint it can use `value`, `addr` and `old`, for instance
+`bpw $C000 if value > old`. A Tcl expression still works there too. `help` lists
+the commands; anything else goes to openMSX's Tcl console (`debug list`,
+`reg A 5`, `slotmap`, and so on).
 
 | Command | Does |
 |---|---|
@@ -267,42 +275,108 @@ Tcl console (`debug list`, `reg A 5`, `slotmap`, and so on).
 | `frame` | Runs to the next VDP interrupt |
 | `runto` | Runs to an address |
 | `break` | An execute breakpoint |
-| `bpr`, `bpw` | Memory reads or writes |
+| `bpr`, `bpw`, `bpa` | Memory reads, writes, or both |
 | `bpin`, `bpout` | I/O port reads or writes |
 | `delete`, `enable`, `clear` | Manage breakpoints (also `disable`, `breaks`) |
-| `regs` | The CPU registers |
+| `print`, `regs`, `set` | Evaluate; show or set the registers |
 | `mem`, `poke` | Dumps memory; writes bytes |
-| `disasm` | Disassembles |
+| `disasm`, `find` | Disassembles; searches memory |
+| `watch`, `unwatch` | Variables to keep an eye on |
+| `trace` | Shows the trace |
+| `cart` | The slots and the cartridge |
+| `video` | The VDP: status, registers, colours, lines, timing |
 | `label`, `labels` | Name an address; load labels |
-
-<!-- context: debugger/cpu -->
-## CPU and memory
-
-The Z80's registers and flags, editable while stopped, and a hex dump of memory.
 
 <!-- context: debugger/disassembly -->
 ## Disassembly
 
 The Z80 disassembled at the PC, with labels from the BIOS table or a symbol file.
-Breakpoints show in the gutter. **Follow PC** keeps the current line in view.
+Breakpoints show in the gutter (red when on, grey when off). **Follow PC** keeps
+the current line in view.
 
-<!-- context: debugger/vdp -->
-## VDP
+<!-- context: debugger/memory -->
+## Memory
 
-The video chip, decoded: the TMS9918A (MSX), the V9938 (MSX2) or the V9958
-(MSX2+). Its modes, the table addresses, the palette RAM, sprite mode 2 and the
-V9938 and V9958 command engine.
+A hex view of the Z80's 64K as the CPU sees it, through the slots. Type an
+address or a label after **Address:** and press Enter. **Poke** writes a byte
+while the machine is stopped. **Search** finds hex bytes or text, and
+**Find Next** and **Find Previous** step through the matches.
 
 <!-- context: debugger/breakpoints -->
 ## Breakpoints
 
-Execute breakpoints, memory read and write watchpoints and I/O port watchpoints,
-each with a Tcl condition, a hit count, and enable or disable. **Add** makes one.
+Execute breakpoints, memory read, write and access watchpoints and I/O port
+watchpoints, each with a condition, a hit count, and enable or disable. **Add**
+makes one. When a watchpoint stops the machine the status line says what it did,
+for instance `wrote $C110 = $12 (was $11)`.
 
-<!-- context: debugger/io -->
-## Slots and I/O
+<!-- context: debugger/watches -->
+## Watches
 
-The slot selection and map, the PSG and the memory mapper.
+Variables to keep an eye on, with their live values while the machine is
+stopped. **Show in Memory** jumps to it, and **Break on Change** adds a write
+breakpoint that fires when the value changes.
+
+<!-- context: debugger/cart -->
+## Cart and I/O
+
+The slot selection and map (primary and secondary slots, the memory mapper, the
+ROM mapper's banks), the PPI, the keyboard matrix, the joystick ports, and the
+memory map: every range the machine answers in.
+
+<!-- context: debugger/trace -->
+## Trace
+
+Every instruction the Z80 runs, live. **Record** turns it on; each instruction is
+kept with its address, bytes, registers and flags (the machine runs a little
+slower while it records). **Branches only** shows jumps and calls, **In range**
+a range, and **Clear** empties it.
+
+<!-- context: debugger/history -->
+## History
+
+The same record as the Trace tab, shown when the machine stops: the instructions
+leading up to a breakpoint or watchpoint, newest at the bottom.
+
+<!-- context: debugger/video -->
+## Video
+
+The video chip, the TMS9918A (MSX), V9938 (MSX2) or V9958 (MSX2+), with the
+picture on the left and its sections on the right. The console records each
+register write by line, so split screens and scrolling show.
+
+| View | Shows |
+|---|---|
+| Display | The last finished frame, as the screen showed it |
+| Decoded | One source: Screen, Patterns, Sprites or Palette |
+| Beam | Stopped only: where the beam was in this frame |
+| Values | The tables as hex, with the VRAM hex view |
+
+**Zoom** goes from 1 to 16 times, or **Fit**. **Overlays** switch on a grid,
+sprite boxes, the border, the beam, a heat tint for what was written lately and
+the lines where the registers changed.
+
+Point at a pixel to see it in **Pixel**: the tile or sprite and its address.
+Click to pin it, click again to let go. **Break on writes** stops the machine
+when the CPU writes that VRAM byte or the matching VDP register; the V9938
+command engine does not go through the port, so it is not seen.
+
+**Registers** shows the VDP registers with how long ago each changed, **Colours**
+the palette, **Lines** the screen bands and **Timing** the frame and line
+length.
+
+<!-- context: debugger/sound -->
+## Sound
+
+The sound chips, read while the machine is stopped: the PSG's registers decoded
+into tones, noise, mixer and envelope, and, when the machine has them, the SCC,
+MSX-MUSIC and MSX-AUDIO.
+
+<!-- context: debugger/symbols -->
+## Symbols
+
+Every known symbol, the BIOS table and the ones you loaded. **Filter** narrows
+the list, and activating a row goes to that address.
 
 <!-- context: debugger/fujinet -->
 ## FujiNet packets
