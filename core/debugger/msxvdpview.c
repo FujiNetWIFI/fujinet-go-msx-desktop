@@ -420,6 +420,32 @@ int msxvdp_parse_poke(const char *text, uint32_t *addr, uint8_t *bytes, int max)
     return n;
 }
 
+/* The 16 colours the snapshot's VDP shows: palette RAM on a V9938/V9958, the
+ * fixed TMS9918A table on an MSX1 VDP. The renderers below use it, so a raster
+ * palette change or a program's own palette shows up in the Decoded views. */
+static const uint8_t k_tms_rgb[16][3] = {
+    {0,0,0},{0,0,0},{0x21,0xC8,0x42},{0x5E,0xDC,0x78},
+    {0x54,0x55,0xED},{0x7D,0x76,0xFC},{0xD4,0x52,0x4D},{0x42,0xEB,0xF5},
+    {0xFC,0x55,0x54},{0xFF,0x79,0x78},{0xD4,0xC1,0x54},{0xE6,0xCE,0x80},
+    {0x21,0xB0,0x3B},{0xC9,0x5B,0xBA},{0xCC,0xCC,0xCC},{0xFF,0xFF,0xFF},
+};
+
+void msxvdp_colours(const msxvdp_snapshot *snap, uint8_t rgb[16][3])
+{
+    int idx;
+    for (idx = 0; idx < 16; idx++) {
+        if (snap->chip == MSXVDP_CHIP_V9918) {
+            memcpy(rgb[idx], k_tms_rgb[idx], 3);
+        } else {
+            const uint8_t lowbyte = snap->palette[idx * 2], highbyte = snap->palette[idx * 2 + 1];
+            const uint8_t redbits = (lowbyte >> 4) & 0x07, bluebits = lowbyte & 0x07, greenbits = highbyte & 0x07;
+            rgb[idx][0] = (uint8_t)((redbits << 5) | (redbits << 2) | (redbits >> 1));
+            rgb[idx][1] = (uint8_t)((greenbits << 5) | (greenbits << 2) | (greenbits >> 1));
+            rgb[idx][2] = (uint8_t)((bluebits << 5) | (bluebits << 2) | (bluebits >> 1));
+        }
+    }
+}
+
 /* ---- rendering: MSX1-compatible modes only (see msxvdp.h header) -------- */
 
 static void fill_gray(uint8_t *rgba, int w, int h)
@@ -436,6 +462,7 @@ void msxvdp_render_nametable(const msxvdp_snapshot *s, uint8_t *rgba)
 
     msxvdp_decode_mode(s, &mi);
     if (mi.base != MSXVDP_MODE_GRAPHIC1 && mi.base != MSXVDP_MODE_GRAPHIC2 &&
+        mi.base != MSXVDP_MODE_GRAPHIC3 &&
         mi.base != MSXVDP_MODE_MULTICOLOR && mi.base != MSXVDP_MODE_TEXT1) {
         fill_gray(rgba, 256, 192);
         return;
@@ -448,13 +475,9 @@ void msxvdp_render_nametable(const msxvdp_snapshot *s, uint8_t *rgba)
      * real V9938/58 chip (its power-on default palette matches the
      * TMS9918A colors), else msxvdp_color_name_v9918's implicit RGB set. */
     {
-        static const uint8_t tms_rgb[16][3] = {
-            {0,0,0},{0,0,0},{0x21,0xC8,0x42},{0x5E,0xDC,0x78},
-            {0x54,0x55,0xED},{0x7D,0x76,0xFC},{0xD4,0x52,0x4D},{0x42,0xEB,0xF5},
-            {0xFC,0x55,0x54},{0xFF,0x79,0x78},{0xD4,0xC1,0x54},{0xE6,0xCE,0x80},
-            {0x21,0xB0,0x3B},{0xC9,0x5B,0xBA},{0xCC,0xCC,0xCC},{0xFF,0xFF,0xFF},
-        };
-        const int g2 = (mi.base == MSXVDP_MODE_GRAPHIC2);
+        uint8_t tms_rgb[16][3];
+        msxvdp_colours(s, tms_rgb);
+        const int g2 = (mi.base == MSXVDP_MODE_GRAPHIC2 || mi.base == MSXVDP_MODE_GRAPHIC3);
         const int txt = (mi.base == MSXVDP_MODE_TEXT1);
         const uint16_t pg_base = g2 ? (uint16_t)((s->regs[4] & 0x04) << 11)
                                     : (uint16_t)((s->regs[4] & 0x07) << 11);
@@ -527,11 +550,12 @@ void msxvdp_render_patterns(const msxvdp_snapshot *s, int bank, uint8_t *rgba)
 
     msxvdp_decode_mode(s, &mi);
     if (mi.base != MSXVDP_MODE_GRAPHIC1 && mi.base != MSXVDP_MODE_GRAPHIC2 &&
+        mi.base != MSXVDP_MODE_GRAPHIC3 &&
         mi.base != MSXVDP_MODE_MULTICOLOR && mi.base != MSXVDP_MODE_TEXT1) {
         fill_gray(rgba, 256, 64);
         return;
     }
-    g2 = (mi.base == MSXVDP_MODE_GRAPHIC2);
+    g2 = (mi.base == MSXVDP_MODE_GRAPHIC2 || mi.base == MSXVDP_MODE_GRAPHIC3);
     pg_base = g2 ? (uint16_t)((s->regs[4] & 0x04) << 11) : (uint16_t)((s->regs[4] & 0x07) << 11);
     pg_mask = g2 ? (uint16_t)(((s->regs[4] & 0x03) << 8) | 0xFF) : 0x00FF;
 
@@ -553,12 +577,8 @@ void msxvdp_render_patterns(const msxvdp_snapshot *s, int bank, uint8_t *rgba)
 void msxvdp_render_sprites(const msxvdp_snapshot *s, uint8_t *rgba,
                            msxvdp_sprite info[32])
 {
-    static const uint8_t tms_rgb[16][3] = {
-        {0,0,0},{0,0,0},{0x21,0xC8,0x42},{0x5E,0xDC,0x78},
-        {0x54,0x55,0xED},{0x7D,0x76,0xFC},{0xD4,0x52,0x4D},{0x42,0xEB,0xF5},
-        {0xFC,0x55,0x54},{0xFF,0x79,0x78},{0xD4,0xC1,0x54},{0xE6,0xCE,0x80},
-        {0x21,0xB0,0x3B},{0xC9,0x5B,0xBA},{0xCC,0xCC,0xCC},{0xFF,0xFF,0xFF},
-    };
+    uint8_t tms_rgb[16][3];
+    msxvdp_colours(s, tms_rgb);
     msxvdp_mode_info mi;
     const uint16_t sat = (uint16_t)((s->regs[5] & 0x7F) << 7);
     const uint16_t spg = (uint16_t)((s->regs[6] & 0x3F) << 11);
@@ -624,12 +644,8 @@ static void fill_rect(uint8_t *rgba, int x0, int y0, int w, int h,
 
 void msxvdp_render_palette(const msxvdp_snapshot *s, uint8_t *rgba)
 {
-    static const uint8_t tms_rgb[16][3] = {
-        {0,0,0},{0,0,0},{0x21,0xC8,0x42},{0x5E,0xDC,0x78},
-        {0x54,0x55,0xED},{0x7D,0x76,0xFC},{0xD4,0x52,0x4D},{0x42,0xEB,0xF5},
-        {0xFC,0x55,0x54},{0xFF,0x79,0x78},{0xD4,0xC1,0x54},{0xE6,0xCE,0x80},
-        {0x21,0xB0,0x3B},{0xC9,0x5B,0xBA},{0xCC,0xCC,0xCC},{0xFF,0xFF,0xFF},
-    };
+    uint8_t tms_rgb[16][3];
+    msxvdp_colours(s, tms_rgb);
     const int inset = 3, scale = 2;
     int i;
 
@@ -672,4 +688,119 @@ void msxvdp_render_palette(const msxvdp_snapshot *s, uint8_t *rgba)
                     fill_rect(rgba, cx + 3 + x * scale, cy + 3 + row * scale,
                              scale, scale, lr, lg, lb);
     }
+}
+
+/* ---- bitmap modes (V9938/V9958: Graphic 4-7) ------------------------------ */
+
+/* A logical VRAM address in the interleaved layout Graphic 6 and 7 use: the
+ * even bytes live in the first 64K, the odd ones in the second. The snapshot
+ * keeps openMSX's "physical VRAM" order. */
+static uint32_t bitmap_phys(int planar, uint32_t logical)
+{
+    return planar ? (((logical & 1u) << 16) | (logical >> 1)) : logical;
+}
+
+int msxvdp_bitmap_geometry(const msxvdp_snapshot *snap, int *wide, int *high,
+                           uint32_t *base, int *pitch)
+{
+    msxvdp_mode_info mode;
+    int lines = (snap->regs[9] & 0x80) ? 212 : 192;
+
+    msxvdp_decode_mode(snap, &mode);
+    if (mode.yjk) return 0;
+    switch (mode.base) {
+    case MSXVDP_MODE_GRAPHIC4:
+        if (wide) *wide = 256;
+        if (pitch) *pitch = 128;
+        if (base) *base = (uint32_t)(snap->regs[2] & 0x60) << 10;
+        break;
+    case MSXVDP_MODE_GRAPHIC5:
+        if (wide) *wide = 512;
+        if (pitch) *pitch = 128;
+        if (base) *base = (uint32_t)(snap->regs[2] & 0x60) << 10;
+        break;
+    case MSXVDP_MODE_GRAPHIC6:
+        if (wide) *wide = 512;
+        if (pitch) *pitch = 256;
+        if (base) *base = (uint32_t)(snap->regs[2] & 0x20) << 11;
+        break;
+    case MSXVDP_MODE_GRAPHIC7:
+        if (wide) *wide = 256;
+        if (pitch) *pitch = 256;
+        if (base) *base = (uint32_t)(snap->regs[2] & 0x20) << 11;
+        break;
+    default:
+        return 0;
+    }
+    if (high) *high = lines;
+    return 1;
+}
+
+int msxvdp_render_bitmap(const msxvdp_snapshot *snap, uint8_t *rgba, int *wide, int *high)
+{
+    msxvdp_mode_info mode;
+    uint8_t col[16][3];
+    uint32_t base;
+    int pitch, pixw, pixh, posy, posx;
+    int planar;
+    const uint32_t size = snap->vram_size ? snap->vram_size : 1;
+
+    if (!msxvdp_bitmap_geometry(snap, &pixw, &pixh, &base, &pitch)) return 0;
+    msxvdp_decode_mode(snap, &mode);
+    planar = mode.is_planar;
+    msxvdp_colours(snap, col);
+    /* Colour 0 is transparent (R#8 TP off): the backdrop (R#7) shows through.
+     * Graphic 5 paints the border from R#7's two low bit pairs. */
+    if (!(snap->regs[8] & 0x20)) {
+        const int backdrop = mode.base == MSXVDP_MODE_GRAPHIC5 ? (snap->regs[7] & 3) : (snap->regs[7] & 15);
+        if (mode.base != MSXVDP_MODE_GRAPHIC7) memcpy(col[0], col[backdrop], 3);
+    }
+    for (posy = 0; posy < pixh; posy++) {
+        /* vertical scroll (R#23) wraps in the 256-line page */
+        const uint32_t row = base + (uint32_t)((posy + snap->regs[23]) & 255) * (uint32_t)pitch;
+        for (posx = 0; posx < pixw; posx++) {
+            uint8_t *dst = rgba + ((size_t)posy * (size_t)pixw + (size_t)posx) * 4;
+            uint32_t address;
+            uint8_t byte;
+            switch (mode.base) {
+            case MSXVDP_MODE_GRAPHIC4:
+                address = row + (uint32_t)(posx >> 1);
+                byte = snap->vram[bitmap_phys(0, address) % size];
+                put_rgba(dst, col[(posx & 1) ? (byte & 15) : (byte >> 4)][0],
+                         col[(posx & 1) ? (byte & 15) : (byte >> 4)][1],
+                         col[(posx & 1) ? (byte & 15) : (byte >> 4)][2]);
+                break;
+            case MSXVDP_MODE_GRAPHIC5: {
+                int idx;
+                address = row + (uint32_t)(posx >> 2);
+                byte = snap->vram[bitmap_phys(0, address) % size];
+                idx = (byte >> (6 - 2 * (posx & 3))) & 3;
+                put_rgba(dst, col[idx][0], col[idx][1], col[idx][2]);
+                break;
+            }
+            case MSXVDP_MODE_GRAPHIC6: {
+                int idx;
+                address = row + (uint32_t)(posx >> 1);
+                byte = snap->vram[bitmap_phys(planar, address) % size];
+                idx = (posx & 1) ? (byte & 15) : (byte >> 4);
+                put_rgba(dst, col[idx][0], col[idx][1], col[idx][2]);
+                break;
+            }
+            default: {   /* Graphic 7: one byte, GGGRRRBB */
+                int red, green, blue;
+                address = row + (uint32_t)posx;
+                byte = snap->vram[bitmap_phys(planar, address) % size];
+                red = (byte >> 2) & 7;
+                green = byte >> 5;
+                blue = byte & 3;
+                put_rgba(dst, (uint8_t)(red * 255 / 7), (uint8_t)(green * 255 / 7),
+                         (uint8_t)(blue * 255 / 3));
+                break;
+            }
+            }
+        }
+    }
+    if (wide) *wide = pixw;
+    if (high) *high = pixh;
+    return 1;
 }

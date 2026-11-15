@@ -181,6 +181,21 @@ void msxvdp_render_palette(const msxvdp_snapshot *s, uint8_t *rgba);
 
 const char *msxvdp_color_name_v9918(int index); /* fixed TMS9918A names */
 
+/* The 16 colours the snapshot's VDP shows: palette RAM on a V9938/V9958, the
+ * fixed TMS9918A table on an MSX1 VDP. 8-bit R, G, B. */
+void msxvdp_colours(const msxvdp_snapshot *snap, uint8_t rgb[16][3]);
+
+/* Graphic 4-7 (the V9938 bitmap modes, not YJK): where the page sits and how
+ * it is laid out. wide is 256 or 512 pixels, high 192 or 212 lines (R#9),
+ * base the logical VRAM address of its first byte (R#2), pitch the bytes in a
+ * line. Returns 0 for any other mode. Any pointer may be NULL. */
+int msxvdp_bitmap_geometry(const msxvdp_snapshot *snap, int *wide, int *high,
+                           uint32_t *base, int *pitch);
+/* Renders the page the mode shows (rgba is wide * high * 4; at most
+ * 512 * 212 * 4), honouring R#23's vertical scroll and, in Graphic 6 and 7,
+ * the interleaved banks. Returns 0 for any other mode. */
+int msxvdp_render_bitmap(const msxvdp_snapshot *snap, uint8_t *rgba, int *wide, int *high);
+
 #ifdef __cplusplus
 }
 #endif

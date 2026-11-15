@@ -63,8 +63,14 @@ add_library(msxsession STATIC
   debugger/symbols.c
   debugger/symbols_builtin.c
   debugger/debugger.c
+  debugger/expr.c
+  debugger/iostate.c
+  debugger/memtools.c
+  debugger/prompt.c
   debugger/fujitrace.c
   debugger/msxvdpview.c
+  # VIDEO agent: the Video tab controller
+  debugger/vidtab.c
 )
 target_link_libraries(msxsession PUBLIC openmsx-lib ${MSX_SDL2_LINK_LIB} Threads::Threads)
 target_include_directories(msxsession
@@ -236,3 +242,47 @@ target_link_libraries(vdp_test PRIVATE msxsession)
 target_include_directories(vdp_test PRIVATE "${CMAKE_SOURCE_DIR}/core/openmsx")
 add_test(NAME vdp_test COMMAND vdp_test)
 set_tests_properties(vdp_test PROPERTIES TIMEOUT 60)
+
+# ---- VIDEO agent: the Video tab ---------------------------------------------
+# vidtab_test: the controller (core/debugger/vidtab.c) on made-up captures plus a
+# fuzz; no machine, so it needs no BIOS. vidtab_live_test: a booted machine
+# stopped by the debugger; the Display view must be the published frame, and
+# Break on writes must stop on a VRAM write. It skips (77) without a BIOS.
+add_executable(vidtab_test tests/vidtab_test.c)
+target_link_libraries(vidtab_test PRIVATE msxsession)
+add_test(NAME vidtab COMMAND vidtab_test)
+set_tests_properties(vidtab PROPERTIES TIMEOUT 120)
+# the MSX_DEBUGGER_VIDEO_* variables, read when the tab is created
+add_test(NAME vidtab_env COMMAND vidtab_test env)
+set_tests_properties(vidtab_env PROPERTIES TIMEOUT 30
+  ENVIRONMENT "MSX_DEBUGGER_VIDEO_VIEW=beam;MSX_DEBUGGER_VIDEO_SOURCE=palette;MSX_DEBUGGER_VIDEO_OVERLAYS=grid,splits;MSX_DEBUGGER_VIDEO_ZOOM=4;MSX_DEBUGGER_VIDEO_SECTION=timing")
+
+add_executable(vidtab_live_test tests/vidtab_live_test.c)
+target_link_libraries(vidtab_live_test PRIVATE msxsession Threads::Threads)
+target_include_directories(vidtab_live_test PRIVATE "${CMAKE_SOURCE_DIR}/core/openmsx")
+add_test(NAME vidtab_live COMMAND vidtab_live_test)
+set_tests_properties(vidtab_live PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
+# ---- end VIDEO agent ---------------------------------------------------------
+
+# ---- ENGINE agent: expressions, the prompt, watches, the machine getters -------
+# expr_test, memtools_test and prompt_test need no machine at all (an engine
+# with nothing behind it), so they run anywhere. engine_test boots C-BIOS and
+# exercises the engine against it; it skips (77) when the machine will not start.
+add_executable(expr_test tests/expr_test.c debugger/expr.c)
+target_include_directories(expr_test PRIVATE "${CMAKE_SOURCE_DIR}/core/debugger")
+add_test(NAME expr COMMAND expr_test)
+
+add_executable(memtools_test tests/memtools_test.c)
+target_link_libraries(memtools_test PRIVATE msxsession)
+add_test(NAME memtools COMMAND memtools_test)
+
+add_executable(prompt_test tests/prompt_test.c)
+target_link_libraries(prompt_test PRIVATE msxsession)
+add_test(NAME prompt COMMAND prompt_test)
+
+add_executable(engine_test tests/engine_test.c)
+target_link_libraries(engine_test PRIVATE msxsession Threads::Threads)
+target_include_directories(engine_test PRIVATE "${CMAKE_SOURCE_DIR}/core/openmsx")
+add_test(NAME engine COMMAND engine_test)
+set_tests_properties(engine PROPERTIES TIMEOUT 120 SKIP_RETURN_CODE 77)
+# ---- end ENGINE agent --------------------------------------------------------

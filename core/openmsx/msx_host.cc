@@ -6,6 +6,7 @@
  */
 
 #include "msx_host.hh"
+#include "msxvidcap.h"
 
 #include "compat.h"
 
@@ -28,11 +29,13 @@
 #include <CoreFoundation/CoreFoundation.h>
 #endif
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <span>
@@ -405,6 +408,127 @@ void openmsx_thread_main() {
 extern "C" void msx_thread_setname_shim_impl(const char* name);
 namespace { inline void msx_thread_setname_shim() { msx_thread_setname_shim_impl("msx-openmsx"); } }
 
+namespace {
+
+// --- Video tab frame capture (core/include/msxvidcap.h) --------------------
+// One capture per published frame, taken on the openMSX thread while a tab
+// asked for them. The VDP is read through the same Tcl debuggables the
+// debugger uses, run directly here (we ARE the openMSX thread), so the frame
+// and the registers/VRAM are the machine's state at the frame's end.
+std::mutex g_cap_mutex;
+int g_cap_users = 0;
+std::atomic<int> g_cap_on{0};
+msxvid_capture* g_cap = nullptr;    // the latest capture, allocated on first enable
+
+void convert_log(const MsxVdpFrameLog& src, msxvid_log& dst) {
+    dst.valid = src.valid;
+    dst.frame = src.frame;
+    dst.lines_per_frame = src.lines_per_frame;
+    dst.pal = src.pal;
+    std::memcpy(dst.regs, src.regs, sizeof dst.regs);
+    std::memcpy(dst.palette, src.palette, sizeof dst.palette);
+    dst.progress_sx = src.progress_sx;
+    dst.progress_sy = src.progress_sy;
+    dst.progress_dx = src.progress_dx;
+    dst.progress_dy = src.progress_dy;
+    dst.last_command = src.last_command;
+    dst.dropped = src.dropped;
+    dst.event_count = src.event_count < MSXVID_MAX_EVENTS ? src.event_count : MSXVID_MAX_EVENTS;
+    for (uint32_t idx = 0; idx < dst.event_count; ++idx) {
+        dst.events[idx].line = src.events[idx].line;
+        dst.events[idx].column = src.events[idx].column;
+        dst.events[idx].kind = src.events[idx].kind;
+        dst.events[idx].index = src.events[idx].index;
+        dst.events[idx].value = src.events[idx].value;
+    }
+}
+
+void fetch_log(int which, msxvid_log& dst) {
+    static thread_local MsxVdpFrameLog scratch;
+    if (msxhost_vdp_capture_frame(which, &scratch)) convert_log(scratch, dst);
+    else dst.valid = 0;
+}
+
+// Reads the VDP into dst. read_bin(command, bytes) runs a Tcl command and
+// returns its byte-array result, read_text(command, text) its string; each
+// returns false on a Tcl error (a debuggable the machine does not have).
+template <class ReadBin, class ReadText>
+void read_vdp_state(msxvid_capture* dst, ReadBin read_bin, ReadText read_text) {
+    std::vector<uint8_t> bytes;
+    std::string text;
+    size_t size = 0x4000;   // a safe MSX1 fallback when "debug size" fails
+
+    std::memset(dst->regs, 0, sizeof dst->regs);
+    std::memset(dst->status, 0, sizeof dst->status);
+    std::memset(dst->palette, 0, sizeof dst->palette);
+    if (read_text("debug size {physical VRAM}", text)) {
+        const long value = std::strtol(text.c_str(), nullptr, 10);
+        if (value > 0 && value <= MSXVID_VRAM_MAX) size = static_cast<size_t>(value);
+    }
+    dst->vram_size = static_cast<uint32_t>(size);
+    std::memset(dst->vram, 0, size);
+    if (read_bin("debug read_block {physical VRAM} 0 " + std::to_string(size), bytes))
+        std::memcpy(dst->vram, bytes.data(), std::min(bytes.size(), size));
+    if (read_bin("debug read_block {VDP regs} 0 64", bytes))
+        std::memcpy(dst->regs, bytes.data(), std::min(bytes.size(), sizeof dst->regs));
+    if (read_bin("debug read_block {VDP status regs} 0 16", bytes))
+        std::memcpy(dst->status, bytes.data(), std::min(bytes.size(), sizeof dst->status));
+    dst->has_palette = read_bin("debug read_block {VDP palette} 0 32", bytes) && bytes.size() >= 32;
+    if (dst->has_palette) std::memcpy(dst->palette, bytes.data(), sizeof dst->palette);
+    // The VDP is told from the machine type ("MSX", "MSX2", "MSX2+", "MSXturboR":
+    // C-BIOS and real machines alike); openMSX has palette and command debuggables
+    // on an MSX1 too, so their presence says nothing. Without an answer, a set
+    // R#25 (YJK/YAE) is a V9958 and otherwise it is a V9938.
+    dst->chip = dst->has_palette ? ((dst->regs[25] & 0x18) ? 2 : 1) : 0;
+    if (read_text("machine_info type", text)) {
+        if (text == "MSX") dst->chip = 0;
+        else if (text == "MSX2") dst->chip = 1;
+        else if (text.compare(0, 4, "MSX2") == 0 || text.find("turbo") != std::string::npos) dst->chip = 2;
+    }
+}
+
+bool openmsx_read_bin(const std::string& command, std::vector<uint8_t>& out) {
+    if (!g_reactor) return false;
+    try {
+        openmsx::TclObject result = g_reactor->getCommandController().executeCommand(command);
+        auto bin = result.getBinary();
+        out.assign(bin.begin(), bin.end());
+        return true;
+    } catch (...) {
+        out.clear();
+        return false;
+    }
+}
+
+bool openmsx_read_text(const std::string& command, std::string& out) {
+    if (!g_reactor) return false;
+    try {
+        openmsx::TclObject result = g_reactor->getCommandController().executeCommand(command);
+        out = std::string(result.getString());
+        return true;
+    } catch (...) {
+        out.clear();
+        return false;
+    }
+}
+
+// Runs on the openMSX thread from msxhost_notify_frame.
+void capture_frame(const uint32_t* frame_pixels) {
+    std::lock_guard<std::mutex> guard(g_cap_mutex);
+    if (!g_cap) return;
+    std::memcpy(g_cap->pixels, frame_pixels, sizeof g_cap->pixels);
+    g_cap->fb_valid = 1;
+    read_vdp_state(g_cap, openmsx_read_bin, openmsx_read_text);
+    fetch_log(0, g_cap->log);
+    g_cap->cur.valid = 0;
+    g_cap->beam_line = g_cap->beam_cycle = -1;
+    g_cap->live = 0;
+    ++g_cap->frame;
+    ++g_cap->serial;
+}
+
+}  // namespace
+
 // Called from the patched openmsx::PostProcessor::rotateFrames() (see
 // tools/openmsx/patches/patch-staged-tree.py) once per finished frame, on
 // the openMSX thread. Packs the CPU-side FrameSource into the fixed
@@ -432,6 +556,7 @@ extern "C" void msxhost_notify_frame(const openmsx::FrameSource* frame) {
             dst[x] = (r << 16) | (g << 8) | b;
         }
     }
+    if (g_cap_on.load(std::memory_order_relaxed)) capture_frame(capture.data());
     g_frame_sink(capture.data(), kFrameW, kFrameH, g_frame_user);
 }
 
@@ -655,6 +780,91 @@ int msxhost_vdp_capture_frame(int which, MsxVdpFrameLog* out) {
                 offsetof(MsxVdpFrameLog, events) +
                     sizeof(MsxVdpEvent) * src.event_count);
     return 1;
+}
+
+void msxhost_capture_enable(int enable) {
+    bool first = false, last = false;
+    {
+        std::lock_guard<std::mutex> guard(g_cap_mutex);
+        if (enable) {
+            if (!g_cap) g_cap = new msxvid_capture();   // value-initialised: zeroed
+            first = g_cap_users == 0;
+            ++g_cap_users;
+            if (first) {
+                g_cap->serial = 0;
+                g_cap->frame = 0;
+                g_cap->fb_valid = 0;
+                g_cap_on.store(1);
+            }
+        } else if (g_cap_users > 0) {
+            --g_cap_users;
+            last = g_cap_users == 0;
+            if (last) g_cap_on.store(0);
+        }
+    }
+    if (first) msxhost_vdp_capture_enable(1);
+    if (last) msxhost_vdp_capture_enable(0);
+}
+
+int msxhost_capture_get(msxvid_capture* dst, uint64_t* serial_inout) {
+    if (!dst || !serial_inout) return 0;
+    std::lock_guard<std::mutex> guard(g_cap_mutex);
+    if (!g_cap || g_cap->serial == 0) return 0;
+    if (*serial_inout != 0 && g_cap->serial == *serial_inout) return 0;
+    std::memcpy(dst, g_cap, offsetof(msxvid_capture, log));
+    dst->log.valid = g_cap->log.valid;
+    std::memcpy(&dst->log, &g_cap->log,
+                offsetof(msxvid_log, events) + sizeof(msxvid_event) * g_cap->log.event_count);
+    dst->cur.valid = 0;
+    dst->beam_line = dst->beam_cycle = -1;
+    dst->frame = g_cap->frame;
+    dst->serial = g_cap->serial;
+    dst->live = 0;
+    *serial_inout = g_cap->serial;
+    return 1;
+}
+
+namespace {
+
+bool sync_read_bin(const std::string& command, std::vector<uint8_t>& out) {
+    static thread_local std::vector<uint8_t> big;
+    int length = 0;
+    if (big.empty()) big.resize(MSXVID_VRAM_MAX);
+    if (!msxhost_execute_sync_binary(command.c_str(), big.data(), static_cast<int>(big.size()), &length)) {
+        out.clear();
+        return false;
+    }
+    out.assign(big.begin(), big.begin() + std::min<size_t>(static_cast<size_t>(length), big.size()));
+    return true;
+}
+
+bool sync_read_text(const std::string& command, std::string& out) {
+    char buf[256];
+    if (!msxhost_execute_sync(command.c_str(), buf, static_cast<int>(sizeof buf))) {
+        out.clear();
+        return false;
+    }
+    out = buf;
+    return true;
+}
+
+int sync_number(const char* command) {
+    std::string text;
+    if (!sync_read_text(command, text) || text.empty()) return -1;
+    return static_cast<int>(std::strtol(text.c_str(), nullptr, 10));
+}
+
+}  // namespace
+
+void msxhost_capture_fill(msxvid_capture* dst) {
+    if (!dst) return;
+    read_vdp_state(dst, sync_read_bin, sync_read_text);
+    fetch_log(1, dst->cur);
+    // The names are the VDP infos of "machine_info"; -1 when this openMSX
+    // calls them something else.
+    dst->beam_line = sync_number("machine_info VDP_line_in_frame");
+    dst->beam_cycle = sync_number("machine_info VDP_cycle_in_line");
+    dst->live = 1;
 }
 
 int msxhost_fujinet_link_up(void) {
