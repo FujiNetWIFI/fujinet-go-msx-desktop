@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "msx_host.hh"
 #include "msxdebug.h"
@@ -31,6 +32,13 @@ static msxdebug *g_dbg;
 static msxsession *g_session;
 
 #define CHECK(cond, ...) do { if (!(cond)) { fprintf(stderr, "engine_test: " __VA_ARGS__); fputc('\n', stderr); failures = 1; } } while (0)
+
+static long now_ms(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_sec * 1000L + now.tv_nsec / 1000000L;
+}
 
 static int wait_stopped(int timeout_ms)
 {
@@ -360,6 +368,20 @@ static void test_stop_words(void)
         snprintf(want, sizeof want, "step at $%04X", cpu.pc);
         CHECK(!strcmp(text, want) && addr == cpu.pc, "step text \"%s\" (want \"%s\"), address $%04X", text, want, addr);
     }
+    {
+        /* the PC in a frame stop is the real one, every time */
+        int round;
+        msxdebug_cpu_set(g_dbg, MSX_REG_IFF1, 1);
+        msxdebug_cpu_set(g_dbg, MSX_REG_IFF2, 1);
+        for (round = 0; round < 12; round++) {
+            msxdebug_frame(g_dbg);
+            CHECK(wait_stopped(4000), "frame round %d never stopped", round);
+            msxdebug_stop_text(g_dbg, text, sizeof text, &addr);
+            CHECK(!strcmp(text, "frame at $0038") && addr == 0x38, "frame round %d: \"%s\"", round, text);
+            msxdebug_cpu_get(g_dbg, &cpu);
+            CHECK(cpu.pc == 0x38, "frame round %d: PC $%04X", round, cpu.pc);
+        }
+    }
     msxdebug_cpu_set(g_dbg, MSX_REG_IFF1, 1);       /* the programs above ran with interrupts off */
     msxdebug_cpu_set(g_dbg, MSX_REG_IFF2, 1);
     msxdebug_frame(g_dbg);
@@ -547,7 +569,16 @@ static void test_machine_getters(const char *expect_type, int expect_mapper)
     char text[400];
     int count, idx, page;
 
+    {
+        /* one round trip, not one per slot and register */
+        const long started = now_ms();
+        int tries;
+        for (tries = 0; tries < 3; tries++) msxdebug_io_get(g_dbg, &ioinfo);
+        CHECK((now_ms() - started) / 3 < 250, "io_get takes %ld ms", (now_ms() - started) / 3);
+    }
     CHECK(msxdebug_io_get(g_dbg, &ioinfo) == 1 && ioinfo.valid, "io_get");
+    for (page = 0; page < 4; page++)
+        CHECK(!strpbrk(ioinfo.page_device[page], "{}"), "braces in the page %d device \"%s\"", page, ioinfo.page_device[page]);
     CHECK(!strcmp(ioinfo.type, expect_type), "type \"%s\", want \"%s\"", ioinfo.type, expect_type);
     CHECK(ioinfo.machine[0] != '\0', "machine id");
     CHECK(ioinfo.mapper == expect_mapper, "mapper = %d, want %d", ioinfo.mapper, expect_mapper);
@@ -591,7 +622,19 @@ static void test_machine_getters(const char *expect_type, int expect_mapper)
     CHECK(strstr(console("cart"), cart.machine) != NULL, "the cart command");
 
     /* the map is ordered and gap free */
-    count = msxdebug_memory_map(g_dbg, map, 16);
+    {
+        const long started = now_ms();
+        count = msxdebug_memory_map(g_dbg, map, 16);
+        CHECK(now_ms() - started < 250, "memory_map takes %ld ms", now_ms() - started);
+    }
+    for (idx = 0; idx < count; idx++)
+        CHECK(!strpbrk(map[idx].name, "{}"), "braces in region \"%s\"", map[idx].name);
+    if (expect_mapper) {
+        /* pages 2 and 3 are the same RAM, yet the register at $FFFF is its own region */
+        CHECK(count >= 2 && map[count - 1].lo == 0xFFFF && map[count - 1].hi == 0xFFFF && map[count - 2].hi == 0xFFFE,
+              "no $FFFF region split out of %d regions", count);
+    }
+    CHECK(strstr(console("io"), "bg") == NULL && strstr(console("io"), "page 0 ($0000)") != NULL, "io text: %s", console("io"));
     CHECK(count >= 2 && count <= 8, "%d regions", count);
     CHECK(map[0].lo == 0 && map[count - 1].hi == 0xFFFF, "the map covers $%04X-$%04X", map[0].lo, map[count - 1].hi);
     for (idx = 1; idx < count; idx++)

@@ -101,16 +101,29 @@ static int eval_text(msxdebug *dbg, outbuf *buf, const char *text, long *val)
     return 0;
 }
 
+/* An address argument: a bare token of 1-4 hex digits is hex unless it names a
+ * label (as in the memory fields); anything else is an expression. */
+static int eval_addr(msxdebug *dbg, outbuf *buf, const char *text, long *val)
+{
+    size_t len = strlen(text), idx;
+    for (idx = 0; idx < len && isxdigit((unsigned char)text[idx]); idx++) {}
+    if (len >= 1 && len <= 4 && idx == len && msxdebug_label_address(dbg, text) < 0) {
+        *val = strtol(text, NULL, 16);
+        return 0;
+    }
+    return eval_text(dbg, buf, text, val);
+}
+
 /* "<addr>" or "<addr>-<end>" */
 static int range_of(msxdebug *dbg, outbuf *buf, char *tok, long *first, long *last)
 {
     char *dash = strchr(tok + 1, '-');
     if (dash) {
         *dash = '\0';
-        if (eval_text(dbg, buf, tok, first) || eval_text(dbg, buf, dash + 1, last)) return -1;
+        if (eval_addr(dbg, buf, tok, first) || eval_addr(dbg, buf, dash + 1, last)) return -1;
         return 0;
     }
-    if (eval_text(dbg, buf, tok, first)) return -1;
+    if (eval_addr(dbg, buf, tok, first)) return -1;
     *last = *first;
     return 0;
 }
@@ -329,7 +342,7 @@ int msxdebug_command(msxdebug *dbg, const char *command, char *dst, int dstsz)
         emit(&buf, "running to the next VDP interrupt...\n");
     } else if (!strcmp(cmd, "runto")) {
         char *tok = next_tok(&cursor);
-        if (!tok || eval_text(dbg, &buf, tok, &val)) {
+        if (!tok || eval_addr(dbg, &buf, tok, &val)) {
             if (!tok) emit(&buf, "usage: runto <addr>\n");
             return buf.len;
         }
@@ -416,7 +429,7 @@ int msxdebug_command(msxdebug *dbg, const char *command, char *dst, int dstsz)
             emit(&buf, "usage: mem <addr> [len]\n");
             return buf.len;
         }
-        if (eval_text(dbg, &buf, addr_tok, &val) || (len_tok && eval_text(dbg, &buf, len_tok, &aux)))
+        if (eval_addr(dbg, &buf, addr_tok, &val) || (len_tok && eval_text(dbg, &buf, len_tok, &aux)))
             return buf.len;
         if (aux > (long)sizeof bytes) aux = (long)sizeof bytes;
         if (aux < 1) aux = 1;
@@ -429,7 +442,7 @@ int msxdebug_command(msxdebug *dbg, const char *command, char *dst, int dstsz)
             emit(&buf, "usage: poke <addr> <val...>\n");
             return buf.len;
         }
-        if (eval_text(dbg, &buf, tok, &val)) return buf.len;
+        if (eval_addr(dbg, &buf, tok, &val)) return buf.len;
         while ((byte_tok = next_tok(&cursor)) != NULL) {
             if (eval_text(dbg, &buf, byte_tok, &aux)) return buf.len;
             msxdebug_write(dbg, (uint16_t)(val + count), (uint8_t)aux);
@@ -444,7 +457,7 @@ int msxdebug_command(msxdebug *dbg, const char *command, char *dst, int dstsz)
         msxdebug_cpu_get(dbg, &cpu);
         val = cpu.pc;
         aux = 8;
-        if ((addr_tok && eval_text(dbg, &buf, addr_tok, &val)) || (count_tok && eval_text(dbg, &buf, count_tok, &aux)))
+        if ((addr_tok && eval_addr(dbg, &buf, addr_tok, &val)) || (count_tok && eval_text(dbg, &buf, count_tok, &aux)))
             return buf.len;
         if (aux > 64) aux = 64;
         if (aux < 1) aux = 1;
@@ -454,7 +467,7 @@ int msxdebug_command(msxdebug *dbg, const char *command, char *dst, int dstsz)
                  lines[idx].bytes, lines[idx].disasm, lines[idx].label[0] ? "   ; " : "", lines[idx].label);
     } else if (!strcmp(cmd, "label")) {
         char *addr_tok = next_tok(&cursor), *name = next_tok(&cursor);
-        if (!addr_tok || !name || eval_text(dbg, &buf, addr_tok, &val)) {
+        if (!addr_tok || !name || eval_addr(dbg, &buf, addr_tok, &val)) {
             if (!addr_tok || !name) emit(&buf, "usage: label <addr> <name>\n");
             return buf.len;
         }

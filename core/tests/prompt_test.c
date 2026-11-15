@@ -107,6 +107,18 @@ int main(void)
     has("delete 3", "deleted 3");
     has("delete 99", "no such breakpoint");
     CHECK(msxdebug_breakpoint_list(g_dbg, list, 16) == 6, "delete left %d", msxdebug_breakpoint_list(g_dbg, list, 16));
+    /* a bare hex address is hex unless it is a label */
+    has("bpw c000", "breakpoint");
+    has("bpin 98", "breakpoint");
+    has("break 4a3c", "breakpoint");
+    msxdebug_breakpoint_list(g_dbg, list, 16);
+    count = msxdebug_breakpoint_list(g_dbg, list, 16);
+    CHECK(list[count - 1].start == 0x4A3C && list[count - 2].start == 0x98 && list[count - 3].start == 0xC000,
+          "bare hex addresses: $%04X $%04X $%04X", list[count - 3].start, list[count - 2].start, list[count - 1].start);
+    has("label $5000 beef", "$5000 = beef");
+    has("break beef", "breakpoint");
+    msxdebug_breakpoint_list(g_dbg, list, 16);
+    CHECK(list[msxdebug_breakpoint_list(g_dbg, list, 16) - 1].start == 0x5000, "a label wins over bare hex");
     has("clear", "all breakpoints cleared");
     has("breaks", "no breakpoints");
 

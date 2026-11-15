@@ -126,25 +126,38 @@ static void find_chips(chips *found)
 
 /* ---- Cart & I/O ----------------------------------------------------------------- */
 
-/* A command whose answer is one number; -1 when it failed. */
-static int rpc_number(const char *fmt, ...)
-{
-    char command[160], res[32];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(command, sizeof(command), fmt, args);
-    va_end(args);
-    if (!msxdebug_rpc(command, res, sizeof(res))) return -1;
-    return atoi(res);
-}
+/* Everything the Cart & I/O tab shows except the slot map's text, in ONE
+ * round trip: each trip to openMSX costs milliseconds, and the older shape of
+ * this (a command per slot, page and register) took most of a second. The
+ * script answers a flat list; names with spaces come back braced. */
+static const char k_io_script[] =
+    "set res [list [machine_info config_name] [machine_info type]];"
+    "foreach slt {0 1 2 3} {lappend res [machine_info issubslotted $slt]};"
+    "foreach pag {0 1 2 3} {"
+    " set sel [get_selected_slot $pag]; set prm [lindex $sel 0]; set sub [lindex $sel 1];"
+    " if {$sub eq {X}} {set sec 0} else {set sec $sub};"
+    " lappend res $prm $sub [lindex [machine_info slot $prm $sec $pag] 0]};"
+    "lappend res [debug read memory 0xFFFF];"
+    "foreach prt {0xA8 0xA9 0xAA 0xAB} {lappend res [debug read ioports $prt]};"
+    "set dbl [debug list];"
+    "lappend res [expr {[lsearch -exact $dbl MapperIO] >= 0}];"
+    "foreach idx {0 1 2 3} {if {[catch {debug read MapperIO $idx} val]} {set val 0}; lappend res $val};"
+    "foreach idx {0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15} {"
+    " if {[catch {debug read keymatrix $idx} val]} {set val 255}; lappend res $val};"
+    "foreach idx {0 1} {if {[catch {debug read joystickports $idx} val]} {set val 63}; lappend res $val};"
+    "set rom {};"
+    "foreach nam $dbl {if {[string match {* romblocks} $nam]} {"
+    " set blk {}; foreach adr {0 8192 16384 24576 32768 40960 49152 57344} {"
+    "  if {[catch {debug read $nam $adr} val]} {set val 255}; lappend blk $val};"
+    " lappend rom $nam {*}$blk}};"
+    "lappend res [expr {[llength $rom] / 9}] {*}$rom;"
+    "set res";
 
-int msxdebug_io_get(msxdebug *dbg, msxdebug_io *out)
+static int io_collect(msxdebug *dbg, msxdebug_io *out, int with_slotmap)
 {
-    chips found;
-    char res[256];
-    int page, idx;
-    uint8_t block[16];
-    int len = 0;
+    char reply[4096];
+    char (*item)[64];
+    int count, page, idx, pos, roms;
 
     memset(out, 0, sizeof(*out));
     for (page = 0; page < 4; page++) {
@@ -152,66 +165,61 @@ int msxdebug_io_get(msxdebug *dbg, msxdebug_io *out)
         out->subslot_reg[page] = -1;
     }
     if (!dbg || !msxsession_is_running(msxdebug_session(dbg))) return 0;
-    if (!msxdebug_rpc("machine_info config_name", out->machine, sizeof(out->machine))) return 0;
-    msxdebug_rpc("machine_info type", out->type, sizeof(out->type));
+    if (!msxdebug_rpc(k_io_script, reply, sizeof(reply))) return 0;
+    item = malloc(160 * sizeof(*item));
+    if (!item) return 0;
+    count = split_list(reply, item, 160);
+    if (count < 40) {
+        free(item);
+        return 0;
+    }
+    snprintf(out->machine, sizeof(out->machine), "%s", item[0]);
+    snprintf(out->type, sizeof(out->type), "%s", item[1]);
     out->valid = 1;
-
-    for (idx = 0; idx < 4; idx++)
-        out->expanded[idx] = rpc_number("machine_info issubslotted %d", idx) > 0;
-    for (page = 0; page < 4; page++) {
-        char sub[8] = "X";
-        int prim = 0;
-        if (msxdebug_rpcf(res, sizeof(res), "get_selected_slot %d", page)) sscanf(res, "%d %7s", &prim, sub);
-        out->page_slot[page] = prim;
-        out->page_subslot[page] = sub[0] == 'X' ? -1 : atoi(sub);
-        msxdebug_rpcf(out->page_device[page], sizeof(out->page_device[page]), "machine_info slot %d %d %d",
-                      prim, out->page_subslot[page] < 0 ? 0 : out->page_subslot[page], page);
+    for (idx = 0; idx < 4; idx++) out->expanded[idx] = atoi(item[2 + idx]) > 0;
+    pos = 6;
+    for (page = 0; page < 4; page++, pos += 3) {
+        char *brace;
+        out->page_slot[page] = atoi(item[pos]) & 3;
+        out->page_subslot[page] = item[pos + 1][0] == 'X' ? -1 : atoi(item[pos + 1]);
+        snprintf(out->page_device[page], sizeof(out->page_device[page]), "%s", item[pos + 2]);
+        while ((brace = strpbrk(out->page_device[page], "{}")) != NULL) memmove(brace, brace + 1, strlen(brace));
     }
-    if (out->expanded[out->page_slot[3] & 3]) {
-        /* the register is visible at $FFFF, complemented, in its own slot only */
-        if (msxdebug_rpc("debug read memory 0xFFFF", res, sizeof(res)))
-            out->subslot_reg[out->page_slot[3] & 3] = ~atoi(res) & 0xFF;
-    }
-
-    for (idx = 0; idx < 4; idx++)
-        out->ppi[idx] = (uint8_t)(rpc_number("debug read ioports %d", 0xA8 + idx) & 0xFF);
-
-    find_chips(&found);
-    out->mapper = found.mapper;
-    if (found.mapper) {
-        len = 0;
-        if (msxhost_execute_sync_binary("debug read_block MapperIO 0 4", block, (int)sizeof(block), &len) &&
-            len >= 4)
-            memcpy(out->mapper_reg, block, 4);
-    }
+    if (out->expanded[out->page_slot[3]])
+        out->subslot_reg[out->page_slot[3]] = ~atoi(item[pos]) & 0xFF;     /* complemented at $FFFF */
+    pos++;
+    for (idx = 0; idx < 4; idx++) out->ppi[idx] = (uint8_t)atoi(item[pos++]);
+    out->mapper = atoi(item[pos++]) > 0;
+    for (idx = 0; idx < 4; idx++) out->mapper_reg[idx] = (uint8_t)atoi(item[pos++]);
     out->keymatrix_rows = 11;
-    len = 0;
-    if (msxhost_execute_sync_binary("debug read_block keymatrix 0 16", out->keymatrix, 16, &len) && len < 16)
-        memset(out->keymatrix + len, 0xFF, (size_t)(16 - len));
-    len = 0;
-    if (msxhost_execute_sync_binary("debug read_block joystickports 0 2", block, (int)sizeof(block), &len) &&
-        len >= 2) {
-        out->joyport[0] = block[0];
-        out->joyport[1] = block[1];
-    }
-
-    for (idx = 0; idx < found.roms && out->rom_mappers < 6; idx++) {
+    for (idx = 0; idx < 16; idx++) out->keymatrix[idx] = (uint8_t)atoi(item[pos++]);
+    out->joyport[0] = (uint8_t)atoi(item[pos++]);
+    out->joyport[1] = (uint8_t)atoi(item[pos++]);
+    roms = atoi(item[pos++]);
+    for (idx = 0; idx < roms && pos + 9 <= count && out->rom_mappers < 6; idx++, pos += 9) {
         int any = 0, win;
         uint8_t samples[8];
         for (win = 0; win < 8; win++) {
-            samples[win] = 0xFF;
-            if (msxdebug_rpcf(res, sizeof(res), "debug read {%s} %d", found.romblocks[idx], win * 0x2000))
-                samples[win] = (uint8_t)atoi(res);
+            samples[win] = (uint8_t)atoi(item[pos + 1 + win]);
             if (samples[win] != 0xFF) any = 1;
         }
         if (!any) continue;
-        snprintf(out->rom[out->rom_mappers].device, sizeof(out->rom[0].device), "%s", found.romblocks[idx]);
-        out->rom[out->rom_mappers].device[strlen(found.romblocks[idx]) - strlen(" romblocks")] = '\0';
+        snprintf(out->rom[out->rom_mappers].device, sizeof(out->rom[0].device), "%s", item[pos]);
+        {
+            char *tail = strstr(out->rom[out->rom_mappers].device, " romblocks");
+            if (tail) *tail = '\0';
+        }
         memcpy(out->rom[out->rom_mappers].block, samples, 8);
         out->rom_mappers++;
     }
-    msxdebug_rpc("slotmap", out->slotmap, sizeof(out->slotmap));
+    free(item);
+    if (with_slotmap) msxdebug_rpc("slotmap", out->slotmap, sizeof(out->slotmap));
     return 1;
+}
+
+int msxdebug_io_get(msxdebug *dbg, msxdebug_io *out)
+{
+    return io_collect(dbg, out, 1);
 }
 
 /* The older text form of the same, kept for the console and old windows. */
@@ -229,9 +237,9 @@ int msxdebug_io_state(msxdebug *dbg, char *dst, int dstsz)
     PUT("Selected slots (CPU pages):\n");
     for (page = 0; page < 4; page++) {
         if (ioinfo.page_subslot[page] < 0)
-            PUT("  page %dbg ($%04X): slot %dbg\n", page, page * 0x4000, ioinfo.page_slot[page]);
+            PUT("  page %d ($%04X): slot %d\n", page, page * 0x4000, ioinfo.page_slot[page]);
         else
-            PUT("  page %dbg ($%04X): slot %dbg-%dbg\n", page, page * 0x4000, ioinfo.page_slot[page], ioinfo.page_subslot[page]);
+            PUT("  page %d ($%04X): slot %d-%d\n", page, page * 0x4000, ioinfo.page_slot[page], ioinfo.page_subslot[page]);
     }
     PUT("\nPPI $A8 (slot register): $%02X\n", ioinfo.ppi[0]);
     if (ioinfo.mapper) {
@@ -243,7 +251,7 @@ int msxdebug_io_state(msxdebug *dbg, char *dst, int dstsz)
         const msxdebug_psg *psg = &sound.psg;
         PUT("\nPSG (AY-3-8910) registers:\n  ");
         for (idx = 0; idx < 14; idx++) PUT("R%X=%02X%s", idx, psg->reg[idx], (idx == 6 || idx == 13) ? "\n  " : " ");
-        PUT("\n  tones: A %dbg, B %dbg, C %dbg  noise %dbg  mixer $%02X  volumes A %dbg B %dbg C %dbg\n",
+        PUT("\n  tones: A %d, B %d, C %d  noise %d  mixer $%02X  volumes A %d B %d C %d\n",
             psg->period[0], psg->period[1], psg->period[2], psg->noise_period, psg->reg[7],
             psg->level[0], psg->level[1], psg->level[2]);
     }
@@ -260,7 +268,7 @@ int msxdebug_memory_map(msxdebug *dbg, msxdebug_region *out, int max)
     int count = 0, page;
 
     if (!out || max <= 0) return 0;
-    if (!dbg || !msxdebug_io_get(dbg, &ioinfo)) {
+    if (!dbg || !io_collect(dbg, &ioinfo, 0)) {
         snprintf(out[0].name, sizeof(out[0].name), "unmapped");
         out[0].lo = 0;
         out[0].hi = 0xFFFF;
@@ -277,6 +285,8 @@ int msxdebug_memory_map(msxdebug *dbg, msxdebug_region *out, int max)
         else snprintf(slot, sizeof(slot), "%d-%d", ioinfo.page_slot[page], ioinfo.page_subslot[page]);
         region->lo = (uint16_t)(page * 0x4000);
         region->hi = (uint16_t)(page * 0x4000 + 0x3FFF);
+        /* an expanded slot's register hides the last byte of page 3 */
+        if (page == 3 && ioinfo.expanded[ioinfo.page_slot[3] & 3]) region->hi = 0xFFFE;
         region->readable = device[0] != '\0';
         region->writable = ram;
         if (device[0]) snprintf(region->name, sizeof(region->name), "%s (slot %s)", device, slot);
@@ -286,17 +296,13 @@ int msxdebug_memory_map(msxdebug *dbg, msxdebug_region *out, int max)
             out[count - 1].hi = region->hi;
             continue;
         }
-        if (page == 3 && ioinfo.expanded[ioinfo.page_slot[3] & 3] && count + 1 < max) {
-            /* the secondary-slot register hides the last byte of the page */
-            region->hi = 0xFFFE;
-            count++;
-            out[count].lo = 0xFFFF;
-            out[count].hi = 0xFFFF;
-            out[count].readable = out[count].writable = 1;
-            snprintf(out[count].name, sizeof(out[count].name), "sub-slot register (slot %d)", ioinfo.page_slot[3]);
-            count++;
-            continue;
-        }
+        count++;
+    }
+    if (ioinfo.expanded[ioinfo.page_slot[3] & 3] && count < max) {
+        out[count].lo = 0xFFFF;
+        out[count].hi = 0xFFFF;
+        out[count].readable = out[count].writable = 1;
+        snprintf(out[count].name, sizeof(out[count].name), "sub-slot register (slot %d)", ioinfo.page_slot[3]);
         count++;
     }
     return count;
