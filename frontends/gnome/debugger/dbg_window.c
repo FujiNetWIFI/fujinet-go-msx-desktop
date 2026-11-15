@@ -648,7 +648,7 @@ static void refresh_mem(DbgWin *self)
     memset(data, 0, sizeof data);
     msxdebug_read(self->dbg, (uint16_t)self->mem_base, data, MEM_PAGE);
     /* the slots do not change while the machine is stopped: one fetch per stop */
-    if (!self->map_valid || self->map_serial != self->seen_serial || !msxdebug_is_stopped(self->dbg)) {
+    if (!self->map_valid || (self->map_serial != self->seen_serial && msxdebug_is_stopped(self->dbg))) {
         self->map_count = msxdebug_memory_map(self->dbg, self->map, 8);
         self->map_serial = self->seen_serial;
         self->map_valid = TRUE;
@@ -1243,7 +1243,8 @@ static void refresh_tab(DbgWin *self, int tab)
 }
 
 /* The status, the register strip, and every tab on screen: the one showing and
- * any in a window of its own. */
+ * any in a window of its own. Stops and actions refresh everything; ticks of a
+ * running machine leave out the tabs that cost several engine round trips. */
 static void refresh_now(DbgWin *self)
 {
     msxdebug_snapshot snap;
@@ -1254,9 +1255,15 @@ static void refresh_now(DbgWin *self)
     self->was_stopped = snap.paused != 0;
     refresh_status(self);
     refresh_regs(self);
-    for (tab = 0; tab < TAB_COUNT; tab++)
+    for (tab = 0; tab < TAB_COUNT; tab++) {
+        /* a running machine is not asked for its disassembly or its slots and
+         * ports on every tick: those wait for a stop, or for their tab to be
+         * opened (on_switch_page), so the UI never blocks on them */
+        if (!snap.paused && (tab == TAB_DISASM || tab == TAB_CART))
+            continue;
         if (tab_visible(self, tab))
             refresh_tab(self, tab);
+    }
 }
 
 /* ---- the timer ------------------------------------------------------------ */
