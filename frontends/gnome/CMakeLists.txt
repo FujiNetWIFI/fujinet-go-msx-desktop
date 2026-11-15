@@ -21,6 +21,7 @@ set(GNOME_SOURCES
   help/help_window.c
   display.c
   debugger/dbg_window.c
+  debugger/dbg_video.c
 )
 
 set(GNOME_APP_ID online.fujinet.go.msx.gnome)
