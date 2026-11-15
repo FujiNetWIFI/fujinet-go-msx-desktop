@@ -344,7 +344,7 @@ int main(void)
     if (msxsession_start(s, &opts) != 0) {
         fprintf(stderr, "openmsx_hooks_test: start failed: %s\n", msxsession_last_error(s));
         msxsession_free(s);
-        return 1;
+        return 77;   /* no machine here (a CI runner without a display): skip, like engine */
     }
     fb = malloc((size_t)MSXSESSION_FB_WIDTH * MSXSESSION_FB_HEIGHT * sizeof(uint32_t));
     for (waited_ms = 0; waited_ms < 10000; waited_ms += 50) {

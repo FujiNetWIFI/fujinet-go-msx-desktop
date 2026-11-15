@@ -226,7 +226,7 @@ add_executable(openmsx_hooks_test tests/openmsx_hooks_test.c)
 target_link_libraries(openmsx_hooks_test PRIVATE msxsession)
 target_include_directories(openmsx_hooks_test PRIVATE "${CMAKE_SOURCE_DIR}/core/openmsx")
 add_test(NAME openmsx_hooks_test COMMAND openmsx_hooks_test)
-set_tests_properties(openmsx_hooks_test PROPERTIES TIMEOUT 90)
+set_tests_properties(openmsx_hooks_test PROPERTIES TIMEOUT 90 SKIP_RETURN_CODE 77)
 
 # The built-in Help covers every setting, key and context. It never touches
 # the emulator, so it needs no machine.
