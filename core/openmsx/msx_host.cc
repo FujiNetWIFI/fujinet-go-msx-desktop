@@ -31,6 +31,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -111,6 +112,20 @@ std::mutex g_fuji_trace_mutex;
 MsxFujiTraceSink g_fuji_trace_sink = nullptr;
 void* g_fuji_trace_user = nullptr;
 std::atomic<int> g_fuji_link{0};
+
+// CPU trace ring -- see msxhost_trace_enable(). The hook runs on the openMSX
+// thread, readers on others, hence the lock; the flag keeps the disabled
+// path to one relaxed load.
+std::mutex g_trace_mutex;
+std::atomic<int> g_trace_on{0};
+std::vector<MsxCpuTraceRec> g_trace_ring;   // sized on first enable
+uint64_t g_trace_total = 0;
+
+// VDP per-line capture -- see msxhost_vdp_capture_enable().
+std::mutex g_vdp_mutex;
+std::atomic<int> g_vdp_on{0};
+MsxVdpFrameLog g_vdp_done;      // last completed frame
+MsxVdpFrameLog g_vdp_current;   // frame in progress
 
 void set_error(const std::string& msg) {
     std::fprintf(stderr, "msx_host: %s\n", msg.c_str());
@@ -443,6 +458,105 @@ extern "C" void msxhost_fujinet_link(int up) {
     g_fuji_link.store(up ? 1 : 0);
 }
 
+// Called from the patched openmsx::CPUCore::cpuTracePost_slow (see
+// tools/openmsx/patches/patch-staged-tree.py) after each traced instruction.
+extern "C" void msxhost_cpu_trace(
+    unsigned pc, unsigned af, unsigned bc, unsigned de, unsigned hl,
+    unsigned ix, unsigned iy, unsigned sp,
+    unsigned af2, unsigned bc2, unsigned de2, unsigned hl2,
+    unsigned reg_i, unsigned reg_r, unsigned im, unsigned iff,
+    unsigned halted, uint64_t ticks, uint32_t opcode_bytes) {
+    if (!g_trace_on.load(std::memory_order_relaxed)) return;
+    MsxCpuTraceRec rec;
+    rec.pc = static_cast<uint16_t>(pc);
+    rec.af = static_cast<uint16_t>(af);
+    rec.bc = static_cast<uint16_t>(bc);
+    rec.de = static_cast<uint16_t>(de);
+    rec.hl = static_cast<uint16_t>(hl);
+    rec.ix = static_cast<uint16_t>(ix);
+    rec.iy = static_cast<uint16_t>(iy);
+    rec.sp = static_cast<uint16_t>(sp);
+    rec.af2 = static_cast<uint16_t>(af2);
+    rec.bc2 = static_cast<uint16_t>(bc2);
+    rec.de2 = static_cast<uint16_t>(de2);
+    rec.hl2 = static_cast<uint16_t>(hl2);
+    rec.reg_i = static_cast<uint8_t>(reg_i);
+    rec.reg_r = static_cast<uint8_t>(reg_r);
+    rec.im = static_cast<uint8_t>(im);
+    rec.iff = static_cast<uint8_t>(iff);
+    rec.halted = static_cast<uint8_t>(halted);
+    for (unsigned slot = 0; slot < 4; ++slot) {
+        rec.op[slot] = static_cast<uint8_t>(opcode_bytes >> (8 * slot));
+    }
+    // openMSX's main clock is 3579545 * 960 Hz.
+    rec.cycle = ticks / 960u;
+    std::lock_guard<std::mutex> lk(g_trace_mutex);
+    if (g_trace_ring.empty()) return;
+    g_trace_ring[static_cast<size_t>(g_trace_total % MSXHOST_TRACE_CAPACITY)] = rec;
+    ++g_trace_total;
+}
+
+// Called from the patched openmsx::VDP (same script): the flag test the
+// register/palette hooks sit behind, then each event and the per-frame
+// baseline. Events and baselines use the frame's own tick count (21 MHz,
+// 1368 per line).
+extern "C" int msxhost_vdp_capture_on(void) {
+    return g_vdp_on.load(std::memory_order_relaxed);
+}
+
+extern "C" void msxhost_vdp_event(int kind, int index, int value,
+                                  int ticks_this_frame) {
+    if (!g_vdp_on.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lk(g_vdp_mutex);
+    if (!g_vdp_current.valid) return;   // no baseline yet: wait for a frame start
+    if (g_vdp_current.event_count >= MSXHOST_VDP_MAX_EVENTS) {
+        ++g_vdp_current.dropped;
+        return;
+    }
+    if (ticks_this_frame < 0) ticks_this_frame = 0;
+    MsxVdpEvent& event = g_vdp_current.events[g_vdp_current.event_count++];
+    event.line = static_cast<uint16_t>(ticks_this_frame / 1368);
+    event.column = static_cast<uint16_t>(ticks_this_frame % 1368);
+    event.kind = static_cast<uint8_t>(kind);
+    event.index = static_cast<uint8_t>(index);
+    event.value = static_cast<uint16_t>(value);
+}
+
+extern "C" void msxhost_vdp_frame_start(unsigned frame, int lines_per_frame,
+                                        int pal, const uint8_t* regs32,
+                                        const uint16_t* palette16,
+                                        const int* command_info13) {
+    if (!g_vdp_on.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lk(g_vdp_mutex);
+    if (g_vdp_current.valid) {
+        std::memcpy(&g_vdp_done, &g_vdp_current,
+                    offsetof(MsxVdpFrameLog, events) +
+                        sizeof(MsxVdpEvent) * g_vdp_current.event_count);
+    }
+    MsxVdpFrameLog& cur = g_vdp_current;
+    cur.valid = 1;
+    cur.frame = frame;
+    cur.lines_per_frame = lines_per_frame;
+    cur.pal = pal;
+    std::memcpy(cur.regs, regs32, sizeof(cur.regs));
+    std::memcpy(cur.palette, palette16, sizeof(cur.palette));
+    cur.progress_sx = command_info13[0];
+    cur.progress_sy = command_info13[1];
+    cur.progress_dx = command_info13[2];
+    cur.progress_dy = command_info13[3];
+    cur.last_sx = command_info13[4];
+    cur.last_sy = command_info13[5];
+    cur.last_dx = command_info13[6];
+    cur.last_dy = command_info13[7];
+    cur.last_nx = command_info13[8];
+    cur.last_ny = command_info13[9];
+    cur.last_colour = command_info13[10];
+    cur.last_argument = command_info13[11];
+    cur.last_command = command_info13[12];
+    cur.event_count = 0;
+    cur.dropped = 0;
+}
+
 // --- C API ----------------------------------------------------------------
 extern "C" {
 
@@ -459,6 +573,88 @@ void msxhost_set_fujinet_trace(MsxFujiTraceSink sink, void* user) {
 
 void msxhost_set_fujinet_endpoint(const char* host, int port) {
     fujinet_go_set_endpoint(host, port);
+}
+
+int msxhost_trace_enable(int on) {
+    if (on) {
+        {
+            std::lock_guard<std::mutex> lk(g_trace_mutex);
+            if (g_trace_ring.empty()) g_trace_ring.resize(MSXHOST_TRACE_CAPACITY);
+        }
+        g_trace_on.store(1);
+        if (!msxhost_execute_sync("set cputrace on", nullptr, 0)) {
+            g_trace_on.store(0);
+            return 0;
+        }
+        return 1;
+    }
+    g_trace_on.store(0);
+    return msxhost_execute_sync("set cputrace off", nullptr, 0);
+}
+
+int msxhost_trace_is_enabled(void) {
+    return g_trace_on.load();
+}
+
+void msxhost_trace_clear(void) {
+    std::lock_guard<std::mutex> lk(g_trace_mutex);
+    g_trace_total = 0;
+}
+
+uint64_t msxhost_trace_total(void) {
+    std::lock_guard<std::mutex> lk(g_trace_mutex);
+    return g_trace_total;
+}
+
+unsigned msxhost_trace_count(void) {
+    std::lock_guard<std::mutex> lk(g_trace_mutex);
+    return g_trace_total < MSXHOST_TRACE_CAPACITY
+               ? static_cast<unsigned>(g_trace_total)
+               : MSXHOST_TRACE_CAPACITY;
+}
+
+unsigned msxhost_trace_read(unsigned first, MsxCpuTraceRec* out, unsigned max) {
+    if (!out || max == 0) return 0;
+    std::lock_guard<std::mutex> lk(g_trace_mutex);
+    const uint64_t held = g_trace_total < MSXHOST_TRACE_CAPACITY
+                              ? g_trace_total
+                              : MSXHOST_TRACE_CAPACITY;
+    if (first >= held) return 0;
+    const uint64_t oldest = g_trace_total - held;
+    unsigned copied = 0;
+    while (copied < max && first + copied < held) {
+        out[copied] = g_trace_ring[static_cast<size_t>(
+            (oldest + first + copied) % MSXHOST_TRACE_CAPACITY)];
+        ++copied;
+    }
+    return copied;
+}
+
+void msxhost_vdp_capture_enable(int on) {
+    std::lock_guard<std::mutex> lk(g_vdp_mutex);
+    if (on && !g_vdp_on.load()) {
+        g_vdp_done.valid = 0;
+        g_vdp_current.valid = 0;
+    }
+    g_vdp_on.store(on ? 1 : 0);
+}
+
+int msxhost_vdp_capture_is_enabled(void) {
+    return g_vdp_on.load();
+}
+
+int msxhost_vdp_capture_frame(int which, MsxVdpFrameLog* out) {
+    if (!out) return 0;
+    std::lock_guard<std::mutex> lk(g_vdp_mutex);
+    const MsxVdpFrameLog& src = which ? g_vdp_current : g_vdp_done;
+    if (!src.valid) {
+        out->valid = 0;
+        return 0;
+    }
+    std::memcpy(out, &src,
+                offsetof(MsxVdpFrameLog, events) +
+                    sizeof(MsxVdpEvent) * src.event_count);
+    return 1;
 }
 
 int msxhost_fujinet_link_up(void) {

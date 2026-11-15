@@ -181,6 +181,99 @@ int msxhost_fujinet_link_up(void);
  * the patched cartridge uses 127.0.0.1 and its compiled-in port. */
 void msxhost_set_fujinet_endpoint(const char* host, int port);
 
+/* --- CPU trace ring (the debugger's Trace and History tabs) ---------------
+ * One record per executed instruction, kept in a bounded ring (the oldest
+ * are overwritten) by a patch in openMSX's CPUCore::cpuTracePost_slow (see
+ * patch-staged-tree.py). The registers are the state AFTER the instruction
+ * at pc ran, like openMSX's own "cputrace" line. A breakpoint is checked
+ * after an instruction, so an instruction that did not run is never
+ * recorded. While tracing is on the CPU takes openMSX's slow path (the same
+ * cost as armed breakpoints); while off nothing is recorded and nothing is
+ * slower. Z80 and R800 alike (an R800 MSX turboR fills the same record).
+ *
+ * msxhost_trace_enable() runs a Tcl command, so it must NOT be called from
+ * openMSX's own thread (a sink, a frame sink); any other thread is fine,
+ * broken or running. It returns 1 on success. openMSX's setting belongs to
+ * one machine: call it again after a machine switch or reset.
+ * The rest are plain mutex-guarded calls, safe from any thread. */
+#define MSXHOST_TRACE_CAPACITY 65536u
+
+typedef struct MsxCpuTraceRec {
+    uint16_t pc;                 /* address of the instruction */
+    uint16_t af, bc, de, hl;
+    uint16_t ix, iy, sp;
+    uint16_t af2, bc2, de2, hl2; /* shadow set */
+    uint8_t reg_i, reg_r;
+    uint8_t im;                  /* 0..2 */
+    uint8_t iff;                 /* bit 0 IFF1, bit 1 IFF2 */
+    uint8_t halted;              /* 1 when the CPU is in HALT after it */
+    uint8_t op[4];               /* the 4 bytes at pc, as the CPU sees them */
+    uint64_t cycle;              /* 3.58 MHz Z80 clocks since machine start */
+} MsxCpuTraceRec;
+
+int msxhost_trace_enable(int on);
+int msxhost_trace_is_enabled(void);
+void msxhost_trace_clear(void);
+/* Records pushed since the last clear (monotonic; may exceed the capacity). */
+uint64_t msxhost_trace_total(void);
+/* Records now held: min(total, MSXHOST_TRACE_CAPACITY). */
+unsigned msxhost_trace_count(void);
+/* Copies up to max records starting at index first (0 = the oldest held) in
+ * execution order; returns the number copied. */
+unsigned msxhost_trace_read(unsigned first, MsxCpuTraceRec* out, unsigned max);
+
+/* --- VDP per-line capture (the debugger's Video tab) ----------------------
+ * While enabled, every VDP register write (R#0-31 and the command registers
+ * R#32-46) and every palette change is logged with the line and the
+ * position in the line it happened at, into a per-frame log. Each frame
+ * also starts with a baseline: the 32 control registers, the 16 palette
+ * entries and the command engine position, taken at the first tick of the
+ * frame. Two frames are kept: the last COMPLETED one (stable, safe to
+ * decode) and the one IN PROGRESS. Off, the hooks are one flag test.
+ * Enabling needs no Tcl, so any thread (including a sink) may call
+ * msxhost_vdp_capture_enable(); a frame becomes valid at the next frame
+ * start after it. */
+#define MSXHOST_VDP_MAX_EVENTS 4096u
+
+enum {
+    MSXHOST_VDP_EVENT_REG = 0,         /* a control/command register write that changed it */
+    MSXHOST_VDP_EVENT_PALETTE = 1,     /* a palette entry changed; value = GRB (see below) */
+    MSXHOST_VDP_EVENT_REG_SAME = 2     /* a write of the value already there */
+};
+
+typedef struct MsxVdpEvent {
+    uint16_t line;      /* absolute line in the frame (0 = frame start) */
+    uint16_t column;    /* VDP clock (21 MHz) within the line, 0..1367 */
+    uint8_t kind;       /* MSXHOST_VDP_EVENT_* */
+    uint8_t index;      /* register number, or palette entry */
+    uint16_t value;     /* register value; for a palette entry openMSX's
+                         * 0x0GRB word (bits 8-10 green, 4-6 red, 0-2 blue
+                         * on a V9938; an MSX1 VDP has a fixed palette) */
+} MsxVdpEvent;
+
+typedef struct MsxVdpFrameLog {
+    int valid;                       /* 0: no frame recorded yet */
+    uint32_t frame;                  /* VDP frame counter */
+    int lines_per_frame;             /* 262 NTSC, 313 PAL */
+    int pal;                         /* 1 when the frame is PAL timed */
+    uint8_t regs[32];                /* control registers at frame start */
+    uint16_t palette[16];            /* GRB words at frame start */
+    int progress_sx, progress_sy;    /* command in progress, -1 when none */
+    int progress_dx, progress_dy;
+    int last_sx, last_sy, last_dx, last_dy, last_nx, last_ny;
+    int last_colour, last_argument, last_command;  /* last executed command */
+    uint32_t event_count;            /* valid entries in events */
+    uint32_t dropped;                /* events lost past MSXHOST_VDP_MAX_EVENTS */
+    MsxVdpEvent events[MSXHOST_VDP_MAX_EVENTS];
+} MsxVdpFrameLog;
+
+void msxhost_vdp_capture_enable(int on);
+int msxhost_vdp_capture_is_enabled(void);
+/* Copies a frame log: which 0 = the last completed frame, 1 = the frame in
+ * progress (a snapshot, still filling). Returns 1 when it holds a frame
+ * (out->valid is set to match). */
+int msxhost_vdp_capture_frame(int which, MsxVdpFrameLog* out);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

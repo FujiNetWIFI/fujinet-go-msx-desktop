@@ -7,7 +7,7 @@ missing, so a pin that has drifted from what these patches expect is a loud
 build error, not a silent no-op -- same discipline as
 tools/xroar/patch-staged-tree.py in the sibling CoCo repo.
 
-Sixteen patches:
+Nineteen patches (17-19 are the debugger hooks, documented at their functions):
 
 1. src/serial/FujiNet.cc: FUJINET_DEFAULT_PORT 1985 -> 65505. Upstream's
    default (and the Android sibling's 1986) would collide with other
@@ -1386,6 +1386,242 @@ def patch_fujinet_endpoint(stage_dir: str) -> None:
     print(f"Patched {path}: settable FujiNet endpoint")
 
 
+def patch_cpu_trace_hook(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/cpu/CPUCore.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "msxhost_cpu_trace"
+    if marker in text:
+        return  # already patched
+
+    def swap(old: str, new: str, what: str) -> None:
+        nonlocal text
+        if text.count(old) != 1:
+            fail(f"{path}: {what} anchor not found exactly once "
+                 "(openMSX source has drifted from the pinned commit?)")
+        text = text.replace(old, new, 1)
+
+    swap("namespace openmsx {\n",
+         "namespace openmsx {\n\n"
+         "// FujiNet Go MSX (desktop) CPU trace hook -- see\n"
+         "// tools/openmsx/patches/patch-staged-tree.py and\n"
+         "// core/openmsx/msx_host.cc. Plain C arguments, no openMSX types.\n"
+         'extern "C" void msxhost_cpu_trace(\n'
+         "\tunsigned pc, unsigned af, unsigned bc, unsigned de, unsigned hl,\n"
+         "\tunsigned ix, unsigned iy, unsigned sp,\n"
+         "\tunsigned af2, unsigned bc2, unsigned de2, unsigned hl2,\n"
+         "\tunsigned reg_i, unsigned reg_r, unsigned im, unsigned iff,\n"
+         "\tunsigned halted, uint64_t ticks, uint32_t opcode_bytes);\n",
+         "'namespace openmsx {'")
+
+    # The whole slow-path body: the stock one dasm()s and prints to cout,
+    # which a desktop app has no use for. Registers are the state AFTER the
+    # instruction at start_pc ran (cpuTracePost), exactly like the stock
+    # line; a breakpoint is checked after an instruction, so an instruction
+    # that did not run is never recorded.
+    swap("\tstd::array<uint8_t, 4> opBuf;\n"
+         "\tstd::string dasmOutput;\n"
+         "\tdasm(*interface, start_pc, opBuf, dasmOutput, T::getTimeFast());\n"
+         "\tdasmOutput.resize(19, ' '); // alternative: print fixed-size field\n"
+         "\tstd::cout << strCat(hex_string<4>(start_pc),\n"
+         '\t                    " : ", dasmOutput,\n'
+         '\t                    " AF=", hex_string<4>(getAF()),\n'
+         '\t                    " BC=", hex_string<4>(getBC()),\n'
+         '\t                    " DE=", hex_string<4>(getDE()),\n'
+         '\t                    " HL=", hex_string<4>(getHL()),\n'
+         '\t                    " IX=", hex_string<4>(getIX()),\n'
+         '\t                    " IY=", hex_string<4>(getIY()),\n'
+         '\t                    " SP=", hex_string<4>(getSP()),\n'
+         "\t                    '\\n')\n"
+         "\t          << std::flush;\n",
+         "\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\tauto now = T::getTimeFast();\n"
+         "\tuint32_t opcodeBytes = 0;\n"
+         "\tfor (unsigned n = 0; n < 4; ++n) {\n"
+         "\t\topcodeBytes |= uint32_t(interface->peekMem(\n"
+         "\t\t\tuint16_t(start_pc + n), now)) << (8 * n);\n"
+         "\t}\n"
+         "\tmsxhost_cpu_trace(\n"
+         "\t\tstart_pc, getAF(), getBC(), getDE(), getHL(),\n"
+         "\t\tgetIX(), getIY(), getSP(),\n"
+         "\t\tgetAF2(), getBC2(), getDE2(), getHL2(),\n"
+         "\t\tgetI(), getR(), getIM(),\n"
+         "\t\t(getIFF1() ? 1u : 0u) | (getIFF2() ? 2u : 0u),\n"
+         "\t\tgetHALT() ? 1u : 0u,\n"
+         "\t\t(now - EmuTime::zero()).length(), opcodeBytes);\n",
+         "cpuTracePost_slow() body")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: CPU trace hook")
+
+
+def patch_write_old_value(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/cpu/MSXCPUInterface.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "wp_last_old"
+    if marker in text:
+        return  # already patched
+
+    def swap(old: str, new: str, what: str) -> None:
+        nonlocal text
+        if text.count(old) != 1:
+            fail(f"{path}: {what} anchor not found exactly once "
+                 "(openMSX source has drifted from the pinned commit?)")
+        text = text.replace(old, new, 1)
+
+    # The byte a write watchpoint's store replaced. The watchpoint runs
+    # after the store, so it is peeked before it, and only when this very
+    # address is watched for writes (one bit test otherwise).
+    swap("void MSXCPUInterface::writeMemSlow(uint16_t address, uint8_t value, EmuTime time)\n"
+         "{\n"
+         "\ttick(CacheLineCounters::DisallowCacheWrite);\n",
+         "// FujiNet Go MSX (desktop): the byte the current write replaced, exported\n"
+         "// to watchpoint conditions as $wp_last_old. See patch-staged-tree.py.\n"
+         "static unsigned fujinetWriteOldValue = ~0u;\n"
+         "\n"
+         "void MSXCPUInterface::writeMemSlow(uint16_t address, uint8_t value, EmuTime time)\n"
+         "{\n"
+         "\ttick(CacheLineCounters::DisallowCacheWrite);\n"
+         "\tif (writeWatchSet[address >> CacheLine::BITS]\n"
+         "\t                 [address &  CacheLine::LOW]) [[unlikely]] {\n"
+         "\t\tfujinetWriteOldValue = visibleDevices[address >> 14]->peekMem(address, time);\n"
+         "\t} else {\n"
+         "\t\tfujinetWriteOldValue = ~0u;\n"
+         "\t}\n",
+         "writeMemSlow() head")
+
+    swap("\tinterp.setVariable(TclObject(\"wp_last_address\"),\n"
+         "\t                   TclObject(int(address)));\n"
+         "\tif (value != ~0u) {\n"
+         "\t\tinterp.setVariable(TclObject(\"wp_last_value\"),\n"
+         "\t\t                   TclObject(int(value)));\n"
+         "\t}\n",
+         "\tinterp.setVariable(TclObject(\"wp_last_address\"),\n"
+         "\t                   TclObject(int(address)));\n"
+         "\tif (value != ~0u) {\n"
+         "\t\tinterp.setVariable(TclObject(\"wp_last_value\"),\n"
+         "\t\t                   TclObject(int(value)));\n"
+         "\t}\n"
+         "\tif ((type == WatchPoint::Type::WRITE_MEM) &&\n"
+         "\t    (fujinetWriteOldValue != ~0u)) {\n"
+         "\t\tinterp.setVariable(TclObject(\"wp_last_old\"),\n"
+         "\t\t                   TclObject(int(fujinetWriteOldValue)));\n"
+         "\t}\n",
+         "executeMemWatch() variables")
+
+    swap("\tinterp.unsetVariable(\"wp_last_address\");\n"
+         "\tinterp.unsetVariable(\"wp_last_value\");\n",
+         "\tinterp.unsetVariable(\"wp_last_address\");\n"
+         "\tinterp.unsetVariable(\"wp_last_value\");\n"
+         "\tinterp.unsetVariable(\"wp_last_old\");\n",
+         "executeMemWatch() unset")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: wp_last_old for write watchpoints")
+
+
+def patch_vdp_line_capture(stage_dir: str) -> None:
+    path = f"{stage_dir}/src/video/VDP.cc"
+    with open(path, "r", encoding="utf-8") as f:
+        text = f.read()
+    marker = "msxhost_vdp_event"
+    if marker in text:
+        return  # already patched
+
+    def swap(old: str, new: str, what: str) -> None:
+        nonlocal text
+        if text.count(old) != 1:
+            fail(f"{path}: {what} anchor not found exactly once "
+                 "(openMSX source has drifted from the pinned commit?)")
+        text = text.replace(old, new, 1)
+
+    swap("namespace openmsx {\n",
+         "namespace openmsx {\n\n"
+         "// FujiNet Go MSX (desktop) per-line VDP capture hooks -- see\n"
+         "// tools/openmsx/patches/patch-staged-tree.py and\n"
+         "// core/openmsx/msx_host.cc. Plain C arguments, no openMSX types.\n"
+         'extern "C" int msxhost_vdp_capture_on(void);\n'
+         'extern "C" void msxhost_vdp_event(int kind, int index, int value,\n'
+         "\tint ticks_this_frame);\n"
+         'extern "C" void msxhost_vdp_frame_start(unsigned frame,\n'
+         "\tint lines_per_frame, int pal, const uint8_t* regs32,\n"
+         "\tconst uint16_t* palette16, const int* command_info13);\n",
+         "'namespace openmsx {'")
+
+    # Baseline: the registers, palette and command engine state at the first
+    # tick of the frame. frameStartTime is reset, so event ticks are relative.
+    swap("\t// Schedule next VSYNC.\n"
+         "\tframeStartTime.reset(time);\n",
+         "\t// Schedule next VSYNC.\n"
+         "\tframeStartTime.reset(time);\n"
+         "\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\tif (msxhost_vdp_capture_on()) {\n"
+         "\t\tint commandInfo[13] = {-1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0, 0};\n"
+         "\t\tif (cmdEngine) {\n"
+         "\t\t\tauto [progSX, progSY, progDX, progDY] =\n"
+         "\t\t\t\tcmdEngine->getInprogressPosition();\n"
+         "\t\t\tcommandInfo[0] = int(progSX);\n"
+         "\t\t\tcommandInfo[1] = int(progSY);\n"
+         "\t\t\tcommandInfo[2] = int(progDX);\n"
+         "\t\t\tcommandInfo[3] = int(progDY);\n"
+         "\t\t\tauto last = cmdEngine->getLastCommand();\n"
+         "\t\t\tcommandInfo[4] = int(std::get<0>(last));\n"
+         "\t\t\tcommandInfo[5] = int(std::get<1>(last));\n"
+         "\t\t\tcommandInfo[6] = int(std::get<2>(last));\n"
+         "\t\t\tcommandInfo[7] = int(std::get<3>(last));\n"
+         "\t\t\tcommandInfo[8] = int(std::get<4>(last));\n"
+         "\t\t\tcommandInfo[9] = int(std::get<5>(last));\n"
+         "\t\t\tcommandInfo[10] = int(std::get<6>(last));\n"
+         "\t\t\tcommandInfo[11] = int(std::get<7>(last));\n"
+         "\t\t\tcommandInfo[12] = int(std::get<8>(last));\n"
+         "\t\t}\n"
+         "\t\tmsxhost_vdp_frame_start(unsigned(frameCount),\n"
+         "\t\t\tgetLinesPerFrame(), palTiming ? 1 : 0,\n"
+         "\t\t\tcontrolRegs.data(), palette.data(), commandInfo);\n"
+         "\t}\n",
+         "frameStart() reset")
+
+    swap("\t// Make sure only bits that actually exist are written.\n"
+         "\tval &= controlValueMasks[reg];\n",
+         "\t// Make sure only bits that actually exist are written.\n"
+         "\tval &= controlValueMasks[reg];\n"
+         "\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\tif (msxhost_vdp_capture_on()) {\n"
+         "\t\tmsxhost_vdp_event((val == controlRegs[reg]) ? 2 : 0, reg, val,\n"
+         "\t\t                  getTicksThisFrame(time));\n"
+         "\t}\n",
+         "changeRegister() mask")
+
+    # Command registers (R#32-46) return before the mask above.
+    swap("\tif (reg >= 32) {\n"
+         "\t\t// MXC belongs to CPU interface;\n",
+         "\tif (reg >= 32) {\n"
+         "\t\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\t\tif (msxhost_vdp_capture_on()) {\n"
+         "\t\t\tmsxhost_vdp_event(0, reg, val, getTicksThisFrame(time));\n"
+         "\t\t}\n"
+         "\t\t// MXC belongs to CPU interface;\n",
+         "changeRegister() command registers")
+
+    swap("\tif (palette[index] != grb) {\n"
+         "\t\trenderer->updatePalette(index, grb, time);\n",
+         "\tif (palette[index] != grb) {\n"
+         "\t\t// FujiNet Go MSX (desktop): see patch-staged-tree.py.\n"
+         "\t\tif (msxhost_vdp_capture_on()) {\n"
+         "\t\t\tmsxhost_vdp_event(1, int(index), int(grb),\n"
+         "\t\t\t                  getTicksThisFrame(time));\n"
+         "\t\t}\n"
+         "\t\trenderer->updatePalette(index, grb, time);\n",
+         "setPalette()")
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+    print(f"Patched {path}: per-line VDP capture hooks")
+
+
 def main() -> None:
     if len(sys.argv) != 2:
         fail("usage: patch-staged-tree.py <staged-openmsx-dir>")
@@ -1406,6 +1642,9 @@ def main() -> None:
     patch_windows_interface_macro(stage_dir)
     patch_fujinet_trace_hook(stage_dir)
     patch_fujinet_endpoint(stage_dir)
+    patch_cpu_trace_hook(stage_dir)
+    patch_write_old_value(stage_dir)
+    patch_vdp_line_capture(stage_dir)
 
 
 if __name__ == "__main__":

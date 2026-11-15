@@ -213,6 +213,15 @@ target_link_libraries(debugger_test PRIVATE msxsession Threads::Threads)
 add_test(NAME debugger_test COMMAND debugger_test)
 set_tests_properties(debugger_test PROPERTIES TIMEOUT 60)
 
+# The openMSX hook patches behind the Trace and Video tabs, through the C API
+# in msx_host.hh: the CPU trace ring, the write watchpoint's old value and the
+# per-line VDP register/palette log, against a real boot.
+add_executable(openmsx_hooks_test tests/openmsx_hooks_test.c)
+target_link_libraries(openmsx_hooks_test PRIVATE msxsession)
+target_include_directories(openmsx_hooks_test PRIVATE "${CMAKE_SOURCE_DIR}/core/openmsx")
+add_test(NAME openmsx_hooks_test COMMAND openmsx_hooks_test)
+set_tests_properties(openmsx_hooks_test PROPERTIES TIMEOUT 90)
+
 # The built-in Help covers every setting, key and context. It never touches
 # the emulator, so it needs no machine.
 add_executable(help_test tests/help_test.c)
