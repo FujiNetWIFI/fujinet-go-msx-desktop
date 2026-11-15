@@ -18,6 +18,7 @@ add_executable(fujinet-go-msx-windows WIN32
   main.c
   display.c
   debugger/dbg_window.c
+  debugger/dbg_video.c
   help/help_window.c
   resource.rc
 )

@@ -1,0 +1,25 @@
+/*
+ * The debugger's Video tab (Win32): a thin view over core/include/msxvidtab.h. It is one
+ * child window holding all its own controls, so the debugger shows, hides, places and pops it
+ * out as a unit.
+ *
+ * Copyright (C) 2026 Thomas Cherryhomes
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ */
+#ifndef MSX_WINDOWS_DBG_VIDEO_H
+#define MSX_WINDOWS_DBG_VIDEO_H
+
+#include <windows.h>
+
+#include "msxdebug.h"
+
+/* The tab's page, a child of `parent`. ui and mono are the fonts it uses. */
+HWND dbg_video_create(HWND parent, msxdebug *engine, HFONT ui, HFONT mono, int dpi);
+/* Move and size the page (it lays out its own controls). */
+void dbg_video_place(HWND page, int x, int y, int w, int h);
+/* Take a snapshot and redraw what changed (force: everything). Cheap to call every tick. */
+void dbg_video_refresh(HWND page, int force);
+/* The debugger's fonts or DPI changed. */
+void dbg_video_fonts(HWND page, HFONT ui, HFONT mono, int dpi);
+
+#endif
