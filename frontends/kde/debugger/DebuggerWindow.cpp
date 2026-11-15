@@ -1,25 +1,28 @@
 /*
  * Debugger window (Qt6 Widgets) over the Z80 / VDP debugger engine, via
- * core/include/msxdebug.h and msxvdp.h. Mirrors the GNOME one tab for tab,
- * and follows the SMS and MS-DOS KDE debuggers (the family's newest).
+ * core/include/msxdebug.h and msxvidtab.h. Mirrors the GNOME one tab for tab,
+ * and follows the INTV KDE debugger (the family's newest): twelve tabs with
+ * the editable register strip under every one.
  *
  * Tabs: the Console (the engine's command line, with a history and Tab
- * completion), CPU & Memory (registers, flags, a hex dump), the Disassembly
- * (click a line to select it for Run to Cursor; click its left edge,
- * double-click it or press F9 for its breakpoint), the VDP (the nametable,
- * pattern, sprite and palette pictures, the decoded state and a VRAM hex
- * editor), Breakpoints (execute, read, write, port IN and OUT, with a Tcl
- * condition), Slots & I/O and FujiNet (the FujiBus packets on the
- * cartridge's socket). The toolbar carries the stepping controls, symbol
- * loading and Save; the family's keys apply (F5 run/stop, F7 step, F8 step
- * over, Shift+F8 step out, Shift+F7 frame, F9 breakpoint, F12 close).
+ * completion), the Disassembly (click a line to select it for Run to Cursor;
+ * click its left edge, double-click it or press F9 for its breakpoint),
+ * Memory (the 64K the CPU sees, Go to, Poke, search), Breakpoints (execute,
+ * read, write, access, port IN and OUT, with an expression condition),
+ * Watches, Cart & I/O (the slots, mapper, PPI, keyboard, joysticks and the
+ * memory map), Trace (live) and History (what ran before the stop), Video
+ * (VideoTab over the core's msxvidtab.h), Sound, Symbols and FujiNet (the
+ * FujiBus packets on the cartridge's socket). The toolbar carries the
+ * stepping controls, symbol loading, Save and Pop Out; the family's keys
+ * apply (F5 run/stop, F7 step, F8 step over, Shift+F8 step out, Shift+F7
+ * frame, F9 breakpoint, F12 close).
  *
  * Showing the window attaches (which stops the machine, as on every
  * sibling); hiding it detaches, which takes the breakpoints out of openMSX
  * and lets the machine run on.
  *
- * A short timer polls the engine's generation (msxdebug_set_stop_callback
- * fires off the UI thread, so it is not used) and refreshes the tab showing
+ * A short timer polls the engine's stop snapshot (msxdebug_set_stop_callback
+ * fires off the UI thread, so it is not used) and refreshes the tabs showing
  * when it moved; while the machine runs, the live tabs refresh twice a
  * second.
  *
@@ -29,9 +32,13 @@
 
 #include "DebuggerWindow.h"
 #include "../help/HelpWindow.h"
+#include "Accent.h"
+#include "VideoTab.h"
 
+#include <QCloseEvent>
 #include <QFileDialog>
 #include <QGridLayout>
+#include <QGroupBox>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QHideEvent>
@@ -43,40 +50,55 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QPointer>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShortcut>
 #include <QShowEvent>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QThread>
 #include <QToolButton>
 #include <QVBoxLayout>
 #include <QWheelEvent>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <functional>
+
+extern "C" {
+#include "msxmemtools.h"
+}
 
 #define DISASM_WINDOW 64        /* lines fetched; as many show as fit */
 #define MEM_ROWS 256            /* 4K of memory, 16 bytes a row */
 #define BP_MAX 256
 #define TRACE_MAX 512
 #define CONSOLE_LINES 5000
-#define VRAM_ROWS 16
-#define POKE_MAX 64
+#define HIST_FETCH 4000         /* ring entries scanned for a Trace / History view */
+#define HIST_SHOWN 400          /* matching lines shown */
 
 namespace {
 
-enum { TAB_CONSOLE, TAB_CPU, TAB_DISASM, TAB_VDP, TAB_BREAKS, TAB_IO, TAB_FUJINET, TAB_COUNT };
+enum { TAB_CONSOLE, TAB_DISASM, TAB_MEMORY, TAB_BREAKS, TAB_WATCHES, TAB_CART, TAB_TRACE, TAB_HISTORY,
+       TAB_VIDEO, TAB_SOUND, TAB_SYMBOLS, TAB_FUJINET, TAB_COUNT };
 
-/* The tabs, in order: the names MSX_DEBUGGER_TAB takes, and their labels
- * (which it takes too). */
+/* The tabs, in order: the names MSX_DEBUGGER_TAB and MSX_POPOUT take, and their
+ * labels (which they take too); the Help context of each is its name. */
 const struct { const char *name, *label; } kTabs[TAB_COUNT] = {
-    { "console", "Console" }, { "cpu", "CPU & Memory" }, { "disassembly", "Disassembly" },
-    { "vdp", "VDP" }, { "breakpoints", "Breakpoints" }, { "slots", "Slots & I/O" },
-    { "fujinet", "FujiNet" },
+    { "console", "Console" }, { "disassembly", "Disassembly" }, { "memory", "Memory" },
+    { "breakpoints", "Breakpoints" }, { "watches", "Watches" }, { "cart", "Cart & I/O" },
+    { "trace", "Trace" }, { "history", "History" }, { "video", "Video" }, { "sound", "Sound" },
+    { "symbols", "Symbols" }, { "fujinet", "FujiNet" },
+};
+
+/* The older names of the tabs that were folded in. */
+const struct { const char *name; int tab; } kTabAliases[] = {
+    { "cpu", TAB_MEMORY }, { "registers", TAB_MEMORY }, { "vdp", TAB_VIDEO }, { "io", TAB_CART }, { "slots", TAB_CART },
 };
 
 /* The register entries, in the order shown, and the msxdebug_reg each sets.
@@ -88,22 +110,21 @@ const struct { const char *name; int id, digits; } kRegs[15] = {
     { "I", MSX_REG_I, 2 },     { "R", MSX_REG_R, 2 },     { "IM", MSX_REG_IM, 0 },
 };
 
-const struct { const char *name; int id; } kFlags[6] = {
-    { "S", MSX_FLAG_S }, { "Z", MSX_FLAG_Z }, { "H", MSX_FLAG_H },
-    { "PV", MSX_FLAG_PV }, { "N", MSX_FLAG_N }, { "C", MSX_FLAG_C },
+/* The flags: their bit in F. */
+const struct { const char *name; int mask; } kFlags[6] = {
+    { "S", 0x80 }, { "Z", 0x40 }, { "H", 0x10 }, { "PV", 0x04 }, { "N", 0x02 }, { "C", 0x01 },
 };
 
 const QString kGray = QStringLiteral("color: gray;");
 
-/* The accent: the Run button while stopped, the PC's line, a marked row. */
-QColor accentColor() { return QColor(0x2a, 0x6a, 0xc8); }
-
-QTextCharFormat accentFormat()
+/* The accent: the Run button while stopped, the PC's line, a marked row. On a
+ * dark theme the light variant with black ink (Accent.h). */
+QTextCharFormat accentFormat(const QWidget *wid)
 {
-    QTextCharFormat f;
-    f.setBackground(accentColor());
-    f.setForeground(Qt::white);
-    return f;
+    QTextCharFormat fmt;
+    fmt.setBackground(msxAccentFill(wid));
+    fmt.setForeground(msxAccentFillInk(wid));
+    return fmt;
 }
 
 void setMono(QWidget *w)
@@ -132,22 +153,6 @@ QString stripControl(const char *s)
     for (const QChar c : in)
         if (c.unicode() >= 0x20 || c == QLatin1Char('\n') || c == QLatin1Char('\t')) out += c;
     return out;
-}
-
-/* $C000, 0xC000, C000h, #49152; a bare number is hex, as everywhere in a
- * Z80 debugger. */
-bool parseNum(const QString &t, long *out)
-{
-    QString s = t.trimmed();
-    bool ok = false;
-    long v = 0;
-    if (s.startsWith('$')) v = s.mid(1).toLong(&ok, 16);
-    else if (s.startsWith(QStringLiteral("0x"), Qt::CaseInsensitive)) v = s.mid(2).toLong(&ok, 16);
-    else if (s.startsWith('#')) v = s.mid(1).toLong(&ok, 10);
-    else if (s.endsWith('h', Qt::CaseInsensitive)) v = s.chopped(1).toLong(&ok, 16);
-    else v = s.toLong(&ok, 16);
-    if (ok) *out = v;
-    return ok;
 }
 
 QString hx(unsigned v, int digits)
@@ -232,23 +237,18 @@ protected:
     }
 };
 
-msxvdp_chip chipFromMachine(const char *machineId)
+/* MSX_DEBUGGER_TAB and MSX_POPOUT: a page number, or a tab's name or label
+ * (any case), or the start of one, or of a word of a label ("memory"), or an
+ * older name (cpu, vdp, io ...). */
+int tabFromEnv(const char *variable = "MSX_DEBUGGER_TAB")
 {
-    if (!machineId) return MSXVDP_CHIP_V9938;
-    if (strstr(machineId, "MSX2+")) return MSXVDP_CHIP_V9958;
-    if (strstr(machineId, "MSX1")) return MSXVDP_CHIP_V9918;
-    return MSXVDP_CHIP_V9938;
-}
-
-/* MSX_DEBUGGER_TAB: a page number, or a tab's name or label (any case), or
- * the start of one, or of a word of a label ("memory" ...). */
-int tabFromEnv()
-{
-    const QString tab = qEnvironmentVariable("MSX_DEBUGGER_TAB").trimmed();
+    const QString tab = qEnvironmentVariable(variable).trimmed();
     if (tab.isEmpty()) return -1;
     bool isNum = false;
     const int n = tab.toInt(&isNum);
     if (isNum) return n >= 0 && n < TAB_COUNT ? n : -1;
+    for (const auto &alias : kTabAliases)
+        if (tab.compare(QString::fromUtf8(alias.name), Qt::CaseInsensitive) == 0) return alias.tab;
     for (int pass = 0; pass < 3; ++pass)
         for (int i = 0; i < TAB_COUNT; ++i) {
             const QString name = QString::fromUtf8(kTabs[i].name), label = QString::fromUtf8(kTabs[i].label);
@@ -263,6 +263,12 @@ int tabFromEnv()
     return -1;
 }
 
+/* The label a tab shows: "&" starts a mnemonic in tab text, so it is doubled. */
+QString tabLabel(int tab)
+{
+    return QString::fromUtf8(kTabs[tab].label).replace(QLatin1Char('&'), QLatin1String("&&"));
+}
+
 /* The family's keys: F5 run/stop, F7 step, Shift+F7 frame, F8 step over,
  * Shift+F8 step out, F9 breakpoint, F12 close. */
 bool isDebuggerKey(const QKeyEvent *e)
@@ -274,6 +280,57 @@ bool isDebuggerKey(const QKeyEvent *e)
     default: return false;
     }
 }
+
+/* A tone as a note: "A4 (+3 cents)". */
+QString noteName(double hertz)
+{
+    static const char *const kNotes[12] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    if (hertz < 8.0) return QStringLiteral("-");
+    const double midi = 69.0 + 12.0 * std::log2(hertz / 440.0);
+    const long note = std::lround(midi);
+    return QStringLiteral("%1 Hz  %2%3 (%4 cents)")
+        .arg(hertz, 0, 'f', 1)
+        .arg(QLatin1String(kNotes[((note % 12) + 12) % 12]))
+        .arg(note / 12 - 1)
+        .arg(std::lround((midi - double(note)) * 100.0));
+}
+
+/* openMSX names a device with spaces as a Tcl list element: "{Main RAM}". */
+QString unbrace(const char *name)
+{
+    QString text = QString::fromUtf8(name);
+    text.remove(QLatin1Char('{')).remove(QLatin1Char('}'));
+    return text;
+}
+
+QString onOff(int value) { return value ? QStringLiteral("on ") : QStringLiteral("off"); }
+QString yesNo(int value) { return value ? QStringLiteral("yes") : QStringLiteral("no"); }
+
+/* A tab's window: closing it docks the tab again. The family's keys work in
+ * it too, handed to the debugger. */
+class PopWindow : public QWidget {
+public:
+    std::function<void()> onClose;
+    std::function<bool(QKeyEvent *)> onKey;
+protected:
+    void closeEvent(QCloseEvent *evt) override
+    {
+        if (onClose) onClose();
+        QWidget::closeEvent(evt);
+    }
+    bool event(QEvent *evt) override
+    {
+        if (evt->type() == QEvent::ShortcutOverride && isDebuggerKey(static_cast<QKeyEvent *>(evt))) {
+            evt->accept();
+            return true;
+        }
+        return QWidget::event(evt);
+    }
+    void keyPressEvent(QKeyEvent *evt) override
+    {
+        if (!onKey || !onKey(evt)) QWidget::keyPressEvent(evt);
+    }
+};
 
 QPointer<DebuggerWindow> s_win;
 
@@ -295,8 +352,7 @@ void DebuggerWindow::toggleFor(QWidget *parent, msxsession *session)
 }
 
 DebuggerWindow::DebuggerWindow(msxsession *session, QWidget *parent)
-    : QMainWindow(parent, Qt::Window), m_session(session), m_dbg(msxsession_debugger(session)),
-      m_chip(chipFromMachine(msxsession_machine(session)))
+    : QMainWindow(parent, Qt::Window), m_session(session), m_dbg(msxsession_debugger(session))
 {
     setObjectName(QStringLiteral("debugger"));
     setWindowTitle(QStringLiteral("Debugger"));
@@ -309,32 +365,53 @@ DebuggerWindow::DebuggerWindow(msxsession *session, QWidget *parent)
     m_tabs->setUsesScrollButtons(true);
     QWidget *pages[TAB_COUNT];
     pages[TAB_CONSOLE] = buildConsole();
-    pages[TAB_CPU] = buildCpu();
     pages[TAB_DISASM] = buildDisasm();
-    pages[TAB_VDP] = buildVdp();
+    pages[TAB_MEMORY] = buildMemory();
     pages[TAB_BREAKS] = buildBreaks();
-    pages[TAB_IO] = buildIo();
+    pages[TAB_WATCHES] = buildWatches();
+    pages[TAB_CART] = buildCart();
+    pages[TAB_TRACE] = buildTrace(0);
+    pages[TAB_HISTORY] = buildTrace(1);
+    pages[TAB_VIDEO] = buildVideo();
+    pages[TAB_SOUND] = buildSound();
+    pages[TAB_SYMBOLS] = buildSymbols();
     pages[TAB_FUJINET] = buildFujinet();
-    for (int i = 0; i < TAB_COUNT; ++i)
-        m_tabs->addTab(pages[i], QString::fromUtf8(kTabs[i].label).replace(QLatin1Char('&'), QLatin1String("&&")));
+    for (int idx = 0; idx < TAB_COUNT; ++idx) {
+        pages[idx]->setProperty("tab", idx);     /* each page keeps its identity when tabs move */
+        m_pages[idx] = pages[idx];
+        m_tabs->addTab(pages[idx], tabLabel(idx));
+    }
     const int tab = tabFromEnv();
     if (tab >= 0) m_tabs->setCurrentIndex(tab);
     /* Help's contexts (msxhelp.h), one per tab */
-    static const char *const kHelpTabs[] = { "console", "cpu", "disassembly", "vdp", "breakpoints", "io", "fujinet" };
-    auto setHelpContext = [this](int page) {
-        if (page >= 0 && page < (int)(sizeof kHelpTabs / sizeof kHelpTabs[0]))
-            setProperty("msxHelpContext", QStringLiteral("debugger/%1").arg(QLatin1String(kHelpTabs[page])));
+    auto setHelpContext = [this]() {
+        const int page = currentTab();
+        if (page >= 0 && page < TAB_COUNT)
+            setProperty("msxHelpContext", QStringLiteral("debugger/%1").arg(QLatin1String(kTabs[page].name)));
     };
-    setHelpContext(m_tabs->currentIndex());
+    setHelpContext();
     new QShortcut(QKeySequence(Qt::Key_F1), this, [this] { msxHelpFor(this); });
-    connect(m_tabs, &QTabWidget::currentChanged, this, [this, setHelpContext](int page) {
-        setHelpContext(page);
-        refreshPage(page, false);
+    connect(m_tabs, &QTabWidget::currentChanged, this, [this, setHelpContext](int) {
+        setHelpContext();
+        /* the view has no size until it shows: fill it now */
+        m_slowNow = true;
+        refreshTab(currentTab(), false);
+        m_slowNow = false;
     });
     root->addWidget(m_tabs, 1);
+    root->addWidget(buildRegs());
     setCentralWidget(central);
     statusBar();
 
+    m_envWatch = qgetenv("MSX_WATCH");
+    m_envWatchBreak = qgetenv("MSX_WATCH_BREAK");
+    m_envMemGoto = qgetenv("MSX_MEM_GOTO");
+    m_envHistory = qEnvironmentVariableIsSet("MSX_HISTORY");
+    const int popTab = tabFromEnv("MSX_POPOUT");
+    if (popTab >= 0) popOut(popTab);     /* for captures: peel a tab off at the start */
+
+    m_slowTimer.setSingleShot(true);
+    connect(&m_slowTimer, &QTimer::timeout, this, [this] { refreshSlow(); });
     connect(&m_timer, &QTimer::timeout, this, [this] { tick(); });
     m_timer.start(100);
 }
@@ -365,18 +442,18 @@ QWidget *DebuggerWindow::buildToolbar()
         [this] { runToCursor(); });
     add(QStringLiteral("Frame (Shift+F7)"), QStringLiteral("On to the next VDP interrupt"),
         [this] { stepAnd(msxdebug_frame); });
-
-    m_status = new ElidedLabel;
-    m_status->setAlignment(Qt::AlignRight);
-    m_status->setStyleSheet(kGray);
-    m_status->setContentsMargins(8, 0, 8, 0);
-    h->addWidget(m_status, 1);
+    h->addStretch(1);
 
     auto *sym = new QPushButton(QStringLiteral("Symbols"));
     sym->setFocusPolicy(Qt::NoFocus);
     sym->setToolTip(QStringLiteral("Labels from a .sym file (HHHH NAME per line)"));
     auto *symMenu = new QMenu(sym);
     symMenu->addAction(QStringLiteral("Load symbols…"), this, [this] { loadSymbols(); });
+    symMenu->addAction(QStringLiteral("Clear loaded symbols"), this, [this] {
+        msxdebug_clear_symbols(m_dbg);
+        refreshSymbols(true);
+        resync();
+    });
     sym->setMenu(symMenu);
     h->addWidget(sym);
 
@@ -393,8 +470,62 @@ QWidget *DebuggerWindow::buildToolbar()
                     [this] { save("regs", QStringLiteral("CPU registers"), QStringLiteral("registers.txt")); });
     saveBtn->setMenu(menu);
     h->addWidget(saveBtn);
+    add(QStringLiteral("Pop Out"), QStringLiteral("Move the tab that shows into a window of its own; Dock puts it back"),
+        [this] { popOut(currentTab()); });
     h->addWidget(msxHelpButton(QString()));
+
+    /* the status line sits in the status bar: the toolbar has no room for it */
+    m_status = new ElidedLabel;
+    m_status->setAlignment(Qt::AlignLeft);
+    statusBar()->addWidget(m_status, 1);
     return bar;
+}
+
+/* The Z80's registers, under every tab. Enter sets one (only while stopped);
+ * a flag or IFF is a check box. */
+QWidget *DebuggerWindow::buildRegs()
+{
+    auto *box = new QGroupBox(QStringLiteral("Registers"));
+    auto *regs = new QGridLayout(box);
+    regs->setVerticalSpacing(2);
+    regs->setHorizontalSpacing(8);
+    /* the main set on the first row, the shadow set and the rest on the second */
+    for (int idx = 0; idx < 15; ++idx) {
+        const int row = idx < 8 ? 0 : 1, col = 2 * (idx < 8 ? idx : idx - 8);
+        auto *nameLabel = new QLabel(QString::fromUtf8(kRegs[idx].name));
+        nameLabel->setStyleSheet(kGray);
+        regs->addWidget(nameLabel, row, col, Qt::AlignRight);
+        m_reg[idx] = new QLineEdit;
+        setMono(m_reg[idx]);
+        m_reg[idx]->setMaxLength(24);
+        setDigits(m_reg[idx], kRegs[idx].digits ? kRegs[idx].digits : 2);
+        m_reg[idx]->setToolTip(QStringLiteral("Enter sets it (a bare number is hex; an expression such as hl + 1 works; "
+                                            "only while stopped)"));
+        connect(m_reg[idx], &QLineEdit::returnPressed, this, [this, idx] { setReg(idx); });
+        regs->addWidget(m_reg[idx], row, col + 1);
+    }
+
+    auto *flags = new QHBoxLayout;
+    for (int idx = 0; idx < 6; ++idx) {
+        m_flag[idx] = new QCheckBox(QString::fromUtf8(kFlags[idx].name));
+        m_flag[idx]->setToolTip(QStringLiteral("Flag %1 of F (only while stopped)").arg(QString::fromUtf8(kFlags[idx].name)));
+        connect(m_flag[idx], &QCheckBox::clicked, this, [this, idx](bool enabled) { setFlag(kFlags[idx].mask, enabled); });
+        flags->addWidget(m_flag[idx]);
+    }
+    flags->addSpacing(16);
+    for (int idx = 0; idx < 2; ++idx) {
+        m_iff[idx] = new QCheckBox(QStringLiteral("IFF%1").arg(idx + 1));
+        connect(m_iff[idx], &QCheckBox::clicked, this, [this, idx](bool enabled) { setIff(idx, enabled); });
+        flags->addWidget(m_iff[idx]);
+    }
+    m_haltNote = new QLabel;
+    m_haltNote->setStyleSheet(kGray);
+    flags->addSpacing(16);
+    flags->addWidget(m_haltNote);
+    flags->addStretch(1);
+    regs->addLayout(flags, 2, 0, 1, 16);
+    regs->setColumnStretch(16, 1);
+    return box;
 }
 
 QWidget *DebuggerWindow::buildConsole()
@@ -405,11 +536,12 @@ QWidget *DebuggerWindow::buildConsole()
     m_conOut->setLineWrapMode(QPlainTextEdit::WidgetWidth);
     m_conOut->setMaximumBlockCount(CONSOLE_LINES);
     m_conOut->setPlainText(QStringLiteral("Debugger console. Type 'help' for every command; anything else is a Tcl "
-                                          "command for openMSX.\n"));
+                                          "command for openMSX. Numbers: $C000 or 0xC000 for hex, bare digits are "
+                                          "decimal.\n"));
     m_conIn = new QLineEdit;
     setMono(m_conIn);
-    m_conIn->setPlaceholderText(QStringLiteral("command (help, step, break, bpw, mem, poke, runto, disasm, regs, "
-                                               "slotmap ...) — Tab completes, Up/Down recall"));
+    m_conIn->setPlaceholderText(QStringLiteral("command (help, step, break, bpw, bpa, print, mem, poke, runto, disasm, "
+                                               "watch, find, video, cart, slotmap ...) — Tab completes, Up/Down recall"));
     m_conIn->installEventFilter(this);
     connect(m_conIn, &QLineEdit::returnPressed, this, [this] { runConsole(); });
     v->addWidget(m_conOut, 1);
@@ -417,79 +549,67 @@ QWidget *DebuggerWindow::buildConsole()
     return w;
 }
 
-QWidget *DebuggerWindow::buildCpu()
+/* The dump: Go to, a page back or on, Poke, and the search bar. */
+QWidget *DebuggerWindow::buildMemory()
 {
-    auto *w = new QWidget;
-    auto *v = new QVBoxLayout(w);
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
 
-    /* the main set on the first row, the shadow set and the rest on the
-     * second; Enter sets one */
-    auto *regs = new QGridLayout;
-    regs->setHorizontalSpacing(8);
-    for (int i = 0; i < 15; ++i) {
-        const int row = i < 8 ? 0 : 1, col = 2 * (i < 8 ? i : i - 8);
-        auto *l = new QLabel(QString::fromUtf8(kRegs[i].name));
-        l->setStyleSheet(kGray);
-        regs->addWidget(l, row, col, Qt::AlignRight);
-        m_reg[i] = new QLineEdit;
-        setMono(m_reg[i]);
-        m_reg[i]->setMaxLength(8);
-        setDigits(m_reg[i], kRegs[i].digits ? kRegs[i].digits : 2);
-        m_reg[i]->setToolTip(QStringLiteral("Enter sets it (hex; only while stopped)"));
-        connect(m_reg[i], &QLineEdit::returnPressed, this, [this, i] { setReg(i); });
-        regs->addWidget(m_reg[i], row, col + 1);
-    }
-    regs->setColumnStretch(16, 1);
-    v->addLayout(regs);
-
-    auto *flags = new QHBoxLayout;
-    for (int i = 0; i < 6; ++i) {
-        m_flag[i] = new QCheckBox(QString::fromUtf8(kFlags[i].name));
-        connect(m_flag[i], &QCheckBox::clicked, this, [this, i](bool on) { setFlag(kFlags[i].id, on); });
-        flags->addWidget(m_flag[i]);
-    }
-    flags->addSpacing(16);
-    for (int i = 0; i < 2; ++i) {
-        m_iff[i] = new QCheckBox(QStringLiteral("IFF%1").arg(i + 1));
-        connect(m_iff[i], &QCheckBox::clicked, this,
-                [this, i](bool on) { setFlag(i ? MSX_REG_IFF2 : MSX_REG_IFF1, on); });
-        flags->addWidget(m_iff[i]);
-    }
-    flags->addStretch(1);
-    v->addLayout(flags);
-
-    v->addWidget(titleLabel(QStringLiteral("Memory (as the CPU sees it through the slot map)")));
-    m_mem = monoView();
-    v->addWidget(m_mem, 1);
-
-    /* the dump: Go to, a page back or on, and a write */
     auto *nav = new QHBoxLayout;
     nav->addWidget(new QLabel(QStringLiteral("Go to")));
-    m_memGoto = smallEntry(QStringLiteral("$C000 or label"), 16);
+    m_memGoto = smallEntry(QStringLiteral("$C000, label or lo-hi"), 22);
     connect(m_memGoto, &QLineEdit::returnPressed, this, [this] { memGoto(); });
     nav->addWidget(m_memGoto);
     for (int dir = -1; dir <= 1; dir += 2) {
-        auto *b = new QToolButton;
-        b->setArrowType(dir < 0 ? Qt::UpArrow : Qt::DownArrow);
-        b->setToolTip(dir < 0 ? QStringLiteral("Back 4K") : QStringLiteral("On 4K"));
-        connect(b, &QToolButton::clicked, this, [this, dir] {
+        auto *arrow = new QToolButton;
+        arrow->setArrowType(dir < 0 ? Qt::UpArrow : Qt::DownArrow);
+        arrow->setToolTip(dir < 0 ? QStringLiteral("Back 4K") : QStringLiteral("On 4K"));
+        connect(arrow, &QToolButton::clicked, this, [this, dir] {
             m_memTop = qBound(0, m_memTop + dir * MEM_ROWS * 16, 0x10000 - MEM_ROWS * 16);
             refreshMem();
         });
-        nav->addWidget(b);
+        nav->addWidget(arrow);
     }
     nav->addSpacing(12);
-    nav->addWidget(new QLabel(QStringLiteral("Write")));
-    m_memAddr = smallEntry(QStringLiteral("$C000"), 10);
-    m_memVal = smallEntry(QStringLiteral("$00"), 5);
-    connect(m_memAddr, &QLineEdit::returnPressed, this, [this] { memWrite(); });
-    connect(m_memVal, &QLineEdit::returnPressed, this, [this] { memWrite(); });
+    nav->addWidget(new QLabel(QStringLiteral("Poke")));
+    m_memAddr = smallEntry(QStringLiteral("address or label"), 16);
+    m_memVal = smallEntry(QStringLiteral("value"), 10);
+    m_memVal->setToolTip(QStringLiteral("A byte: hex, or an expression. Only while stopped; ROM ignores it."));
+    auto *pokeBtn = new QPushButton(QStringLiteral("Poke"));
+    connect(m_memAddr, &QLineEdit::returnPressed, this, [this] { memPoke(); });
+    connect(m_memVal, &QLineEdit::returnPressed, this, [this] { memPoke(); });
+    connect(pokeBtn, &QPushButton::clicked, this, [this] { memPoke(); });
     nav->addWidget(m_memAddr);
-    nav->addWidget(new QLabel(QStringLiteral("value")));
     nav->addWidget(m_memVal);
+    nav->addWidget(pokeBtn);
     nav->addStretch(1);
-    v->addLayout(nav);
-    return w;
+    layout->addLayout(nav);
+
+    auto *search = new QHBoxLayout;
+    search->addWidget(new QLabel(QStringLiteral("Search")));
+    m_srchKind = new QComboBox;
+    m_srchKind->addItems({ QStringLiteral("Hex bytes"), QStringLiteral("Text") });
+    m_srchKind->setToolTip(QStringLiteral("Hex bytes (3E 01) or text, one byte per character"));
+    search->addWidget(m_srchKind);
+    m_srchEntry = new QLineEdit;
+    m_srchEntry->setPlaceholderText(QStringLiteral("bytes or text"));
+    connect(m_srchEntry, &QLineEdit::returnPressed, this, [this] { memSearch(false); });
+    search->addWidget(m_srchEntry, 1);
+    auto *next = new QPushButton(QStringLiteral("Find Next"));
+    auto *prev = new QPushButton(QStringLiteral("Find Previous"));
+    connect(next, &QPushButton::clicked, this, [this] { memSearch(false); });
+    connect(prev, &QPushButton::clicked, this, [this] { memSearch(true); });
+    search->addWidget(next);
+    search->addWidget(prev);
+    m_srchNote = new QLabel;
+    m_srchNote->setStyleSheet(kGray);
+    search->addWidget(m_srchNote);
+    layout->addLayout(search);
+
+    layout->addWidget(titleLabel(QStringLiteral("Memory (as the CPU sees it through the slot map)")));
+    m_mem = monoView();
+    layout->addWidget(m_mem, 1);
+    return page;
 }
 
 QWidget *DebuggerWindow::buildDisasm()
@@ -518,79 +638,6 @@ QWidget *DebuggerWindow::buildDisasm()
     m_disasm->viewport()->installEventFilter(this);
     v->addWidget(m_disasm, 1);
     return w;
-}
-
-QWidget *DebuggerWindow::buildVdp()
-{
-    auto *vdp = new QWidget;
-    auto *grid = new QGridLayout(vdp);
-    auto make_pic = [](QLabel **out, int w, int h) {
-        auto *l = new QLabel;
-        l->setMinimumSize(w, h);
-        l->setScaledContents(true);
-        *out = l;
-        return l;
-    };
-    /* the nametable left, the patterns over the sprites in the middle, the
-     * sprite list right: 1100 pixels wide, so it fits the window */
-    grid->addWidget(new QLabel(QStringLiteral("Nametable")), 0, 0);
-    grid->addWidget(make_pic(&m_nt, 448, 336), 1, 0, 4, 1, Qt::AlignTop);
-    m_patBank = new QComboBox;
-    m_patBank->addItems({ QStringLiteral("Bank 0"), QStringLiteral("Bank 1"), QStringLiteral("Bank 2") });
-    connect(m_patBank, &QComboBox::currentIndexChanged, this, [this](int) { refreshVdp(); });
-    grid->addWidget(new QLabel(QStringLiteral("Patterns")), 0, 1);
-    grid->addWidget(m_patBank, 1, 1);
-    grid->addWidget(make_pic(&m_pat, 384, 96), 2, 1, Qt::AlignTop);
-    grid->addWidget(new QLabel(QStringLiteral("Sprites")), 3, 1);
-    grid->addWidget(make_pic(&m_spr, 256, 128), 4, 1, Qt::AlignTop);
-    grid->addWidget(new QLabel(QStringLiteral("Sprite list")), 0, 2);
-    m_spriteInfo = monoView();
-    m_spriteInfo->setMinimumWidth(200);
-    grid->addWidget(m_spriteInfo, 1, 2, 4, 1);
-    grid->addWidget(new QLabel(QStringLiteral("Palette")), 5, 0);
-    /* 1:1 with the rendered swatch grid so the index labels stay crisp */
-    m_pal = new QLabel;
-    m_pal->setFixedSize(MSXVDP_PAL_W, MSXVDP_PAL_H);
-    grid->addWidget(m_pal, 6, 0, Qt::AlignTop | Qt::AlignLeft);
-
-    /* decoded registers, status and command engine */
-    grid->addWidget(new QLabel(QStringLiteral("Registers, status & command engine")), 5, 1);
-    m_vdpState = monoView();
-    m_vdpState->setMinimumHeight(260);
-    grid->addWidget(m_vdpState, 6, 1, 1, 2);
-
-    /* the physical-VRAM hex editor */
-    grid->addWidget(new QLabel(QStringLiteral("Physical VRAM (Enter writes; addr [bytes...])")), 7, 0, 1, 3);
-    auto *bar = new QWidget;
-    auto *barLayout = new QHBoxLayout(bar);
-    barLayout->setContentsMargins(0, 0, 0, 0);
-    m_vramEntry = new QLineEdit;
-    m_vramEntry->setPlaceholderText(QStringLiteral("addr [bytes...] e.g. 1800: 41 42 43"));
-    connect(m_vramEntry, &QLineEdit::returnPressed, this, [this] { vramSubmit(); });
-    auto *prev = new QPushButton(QStringLiteral("◀"));
-    auto *next = new QPushButton(QStringLiteral("▶"));
-    prev->setFixedWidth(40);
-    next->setFixedWidth(40);
-    connect(prev, &QPushButton::clicked, this, [this] { vramPage(-1); });
-    connect(next, &QPushButton::clicked, this, [this] { vramPage(1); });
-    m_vramStatus = new QLabel;
-    barLayout->addWidget(m_vramEntry, 1);
-    barLayout->addWidget(prev);
-    barLayout->addWidget(next);
-    barLayout->addWidget(m_vramStatus);
-    grid->addWidget(bar, 8, 0, 1, 3);
-    m_vramView = monoView();
-    m_vramView->setMinimumHeight(180);
-    grid->addWidget(m_vramView, 9, 0, 1, 3);
-    /* the slack goes to the pictures, or every label floats away from what
-     * it labels */
-    grid->setRowStretch(4, 1);
-
-    /* the page can outgrow the window on a short screen: it scrolls */
-    auto *scroll = new QScrollArea;
-    scroll->setWidgetResizable(true);
-    scroll->setWidget(vdp);
-    return scroll;
 }
 
 QWidget *DebuggerWindow::buildBreaks()
@@ -624,16 +671,25 @@ QWidget *DebuggerWindow::buildBreaks()
 
     auto *row = new QHBoxLayout;
     m_bpType = new QComboBox;
-    m_bpType->addItems({ QStringLiteral("exec"), QStringLiteral("read"), QStringLiteral("write"),
-                         QStringLiteral("in"), QStringLiteral("out") });
-    m_bpType->setToolTip(QStringLiteral("in and out take a port ($00-$FF)"));
+    m_bpType->addItems({ QStringLiteral("Execute"), QStringLiteral("Read"), QStringLiteral("Write"),
+                         QStringLiteral("Access"), QStringLiteral("In"), QStringLiteral("Out") });
+    m_bpType->setToolTip(QStringLiteral("Access is a read or a write of the range; In and Out take a port ($00-$FF)"));
     m_bpStart = smallEntry(QStringLiteral("start ($4000 or label)"), 22);
     m_bpEnd = smallEntry(QStringLiteral("end (optional)"), 16);
     m_bpCond = new QLineEdit;
-    m_bpCond->setPlaceholderText(QStringLiteral("condition (optional Tcl expression, e.g. [reg A] == 5)"));
+    m_bpCond->setPlaceholderText(QStringLiteral("condition (optional): value != old, a == 5, [$C000] > 3"));
+    m_bpCond->setToolTip(QStringLiteral(
+        "An expression: numbers ($C000), the Z80 registers (a hl ix af' ...), flags (zf cf ...), labels, [addr] "
+        "(a byte) and {addr} (a word), frame, cycles, vline, and for an access value, addr and old (the byte a "
+        "write replaced). An openMSX Tcl expression ([reg A] == 5) works too. Empty stops every time."));
     auto *add = new QPushButton(QStringLiteral("Add"));
+    auto *clearHits = new QPushButton(QStringLiteral("Clear Hits"));
     auto *clear = new QPushButton(QStringLiteral("Clear All"));
     connect(add, &QPushButton::clicked, this, [this] { addBreakpoint(); });
+    connect(clearHits, &QPushButton::clicked, this, [this] {
+        msxdebug_breakpoint_clear_hits(m_dbg);
+        resync();
+    });
     connect(clear, &QPushButton::clicked, this, [this] {
         msxdebug_breakpoint_clear(m_dbg);
         resync();
@@ -645,6 +701,7 @@ QWidget *DebuggerWindow::buildBreaks()
     row->addWidget(m_bpEnd);
     row->addWidget(m_bpCond, 1);
     row->addWidget(add);
+    row->addWidget(clearHits);
     row->addWidget(clear);
     v->addLayout(row);
 
@@ -652,13 +709,168 @@ QWidget *DebuggerWindow::buildBreaks()
     m_bpMsg->setWordWrap(true);
     m_bpMsg->setStyleSheet(QStringLiteral("color: #e01b24;"));
     v->addWidget(m_bpMsg);
+    m_bpStop = new QLabel;
+    m_bpStop->setStyleSheet(kGray);
+    v->addWidget(m_bpStop);
     return w;
 }
 
-QWidget *DebuggerWindow::buildIo()
+QWidget *DebuggerWindow::buildWatches()
 {
-    m_io = monoView();
-    return m_io;
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
+    auto *form = new QHBoxLayout;
+    form->addWidget(new QLabel(QStringLiteral("Watch")));
+    m_wtEntry = new QLineEdit;
+    m_wtEntry->setPlaceholderText(QStringLiteral("address, label, expression or first-last"));
+    connect(m_wtEntry, &QLineEdit::returnPressed, this, [this] { addWatch(); });
+    form->addWidget(m_wtEntry, 1);
+    auto *add = new QPushButton(QStringLiteral("Add"));
+    connect(add, &QPushButton::clicked, this, [this] { addWatch(); });
+    form->addWidget(add);
+    layout->addLayout(form);
+
+    m_wtList = new QListWidget;
+    setMono(m_wtList);
+    layout->addWidget(m_wtList, 1);
+
+    auto *foot = new QHBoxLayout;
+    foot->addStretch();
+    auto *mem = new QPushButton(QStringLiteral("Memory"));
+    mem->setToolTip(QStringLiteral("Show the selected watch in the Memory tab"));
+    connect(mem, &QPushButton::clicked, this, [this] {
+        uint16_t first, last;
+        if (m_wtList->currentRow() >= 0 && msxwatch_range(m_dbg, m_wtList->currentRow(), &first, &last)) {
+            showTab(TAB_MEMORY);
+            showInMemory(first, last);
+        }
+    });
+    auto *brk = new QPushButton(QStringLiteral("Break on Change"));
+    brk->setToolTip(QStringLiteral("A write breakpoint on it with the condition value != old"));
+    connect(brk, &QPushButton::clicked, this, [this] {
+        uint16_t first, last;
+        if (m_wtList->currentRow() < 0 || !msxwatch_range(m_dbg, m_wtList->currentRow(), &first, &last)) return;
+        char err[200] = "";
+        if (msxdebug_breakpoint_add(m_dbg, MSXDEBUG_BP_WRITE, first, last, "value != old", err, sizeof err) >= 0)
+            message(QStringLiteral("Breaking when it changes"));
+        else
+            message(err[0] ? stripControl(err) : QStringLiteral("The breakpoint could not be added"));
+        syncLater();
+    });
+    auto *remove = new QPushButton(QStringLiteral("Remove"));
+    connect(remove, &QPushButton::clicked, this, [this] {
+        if (m_wtList->currentRow() >= 0) {
+            msxwatch_remove(m_wtList->currentRow());
+            syncLater();
+        }
+    });
+    foot->addWidget(mem);
+    foot->addWidget(brk);
+    foot->addWidget(remove);
+    layout->addLayout(foot);
+    return page;
+}
+
+/* The machine above (cart, memory map), the I/O below (slots, mapper, PPI,
+ * keyboard, joysticks). */
+QWidget *DebuggerWindow::buildCart()
+{
+    m_cartText = monoView();
+    m_ioText = monoView();
+    m_cartText->setLineWrapMode(QPlainTextEdit::WidgetWidth);      /* the device list is long */
+    auto *split = new QSplitter(Qt::Vertical);
+    split->addWidget(m_cartText);
+    split->addWidget(m_ioText);
+    split->setChildrenCollapsible(false);
+    split->setSizes({ 300, 300 });
+    return split;
+}
+
+/* Trace (0) and History (1): a Record switch, a filter, a note and the text.
+ * Trace follows the machine live; History is what ran before the stop. */
+QWidget *DebuggerWindow::buildTrace(int which)
+{
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
+    auto *bar = new QHBoxLayout;
+
+    m_hRec[which] = new QPushButton(QStringLiteral("Record"));
+    m_hRec[which]->setCheckable(true);
+    m_hRec[which]->setStyleSheet(QStringLiteral("QPushButton:checked { background: %1; color: %2; }")
+                                     .arg(msxAccentFill(m_hRec[which]).name(), msxAccentFillInk(m_hRec[which]).name()));
+    m_hRec[which]->setToolTip(QStringLiteral("Record every instruction the CPU runs (the machine runs a little slower)"));
+    connect(m_hRec[which], &QPushButton::toggled, this, [this, which](bool enabled) {
+        if (m_hSync) return;
+        if (which == 0) msxdebug_trace_enable(m_dbg, enabled);
+        else msxdebug_history_enable(m_dbg, enabled);
+        syncLater();
+    });
+    m_hFilter[which] = new QComboBox;
+    m_hFilter[which]->addItems({ QStringLiteral("All instructions"), QStringLiteral("Branches only"),
+                                 QStringLiteral("In range") });
+    m_hRange[which] = new QLineEdit;
+    m_hRange[which]->setPlaceholderText(QStringLiteral("range: lo-hi or a label"));
+    auto changed = [this] {
+        m_hSeen[0] = m_hSeen[1] = ~0ull;
+        syncLater();
+    };
+    connect(m_hFilter[which], &QComboBox::currentIndexChanged, this, changed);
+    connect(m_hRange[which], &QLineEdit::returnPressed, this, changed);
+    auto *clear = new QPushButton(QStringLiteral("Clear"));
+    connect(clear, &QPushButton::clicked, this, [this, which] {
+        if (which == 0) msxdebug_trace_clear(m_dbg);
+        else msxdebug_history_clear(m_dbg);
+        m_hSeen[0] = m_hSeen[1] = ~0ull;
+        syncLater();
+    });
+    m_hNote[which] = new QLabel;
+    m_hNote[which]->setStyleSheet(kGray);
+    m_hNote[which]->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    bar->addWidget(m_hRec[which]);
+    bar->addWidget(m_hFilter[which]);
+    bar->addWidget(m_hRange[which], 1);
+    bar->addWidget(clear);
+    bar->addWidget(m_hNote[which], 1);
+    layout->addLayout(bar);
+    m_hText[which] = monoView();
+    layout->addWidget(m_hText[which], 1);
+    return page;
+}
+
+QWidget *DebuggerWindow::buildVideo()
+{
+    m_video = new VideoTab(m_dbg);
+    return m_video;
+}
+
+QWidget *DebuggerWindow::buildSound()
+{
+    m_soundText = monoView();
+    return m_soundText;
+}
+
+QWidget *DebuggerWindow::buildSymbols()
+{
+    auto *page = new QWidget;
+    auto *layout = new QVBoxLayout(page);
+    auto *bar = new QHBoxLayout;
+    bar->addWidget(new QLabel(QStringLiteral("Filter")));
+    m_symFilter = new QLineEdit;
+    connect(m_symFilter, &QLineEdit::textChanged, this, [this] { refreshSymbols(false); });
+    bar->addWidget(m_symFilter, 1);
+    m_symCount = new QLabel;
+    bar->addWidget(m_symCount);
+    layout->addLayout(bar);
+    m_symList = new QListWidget;
+    setMono(m_symList);
+    m_symList->setToolTip(QStringLiteral("Enter or double-click shows it in the Memory tab"));
+    connect(m_symList, &QListWidget::itemActivated, this, [this](QListWidgetItem *item) {
+        const unsigned addr = item->data(Qt::UserRole).toUInt();
+        showTab(TAB_MEMORY);
+        showInMemory(uint16_t(addr), uint16_t(addr));
+    });
+    layout->addWidget(m_symList, 1);
+    return page;
 }
 
 /* The packets left (a note and Clear over them), the cartridge's link and
@@ -701,22 +913,19 @@ QWidget *DebuggerWindow::buildFujinet()
 
 /* ---- refresh -------------------------------------------------------------- */
 
-void DebuggerWindow::refreshStatus()
+void DebuggerWindow::refreshStatus(const msxdebug_snapshot &snap)
 {
-    char reason[160];
-    int addr;
-    const bool stopped = msxdebug_is_stopped(m_dbg) != 0;
-    reason[0] = '\0';
-    msxdebug_stop_reason(m_dbg, reason, sizeof reason, &addr);
-    const QString text = stopped ? QStringLiteral("Stopped%1%2").arg(reason[0] ? ": " : "", stripControl(reason))
-                                 : QStringLiteral("Running");
+    const bool stopped = snap.paused != 0;
+    const QString text = stopped ? QStringLiteral("Stopped: %1").arg(stripControl(snap.text)) : QStringLiteral("Running");
     if (m_status->text() != text) {
         m_status->setText(text);
         m_status->setToolTip(text);
         m_status->update();
     }
     m_runBtn->setText(stopped ? QStringLiteral("Run (F5)") : QStringLiteral("Stop (F5)"));
-    m_runBtn->setStyleSheet(stopped ? QStringLiteral("background: %1; color: white;").arg(accentColor().name())
+    /* the action on offer wears the accent: Run while stopped */
+    m_runBtn->setStyleSheet(stopped ? QStringLiteral("background: %1; color: %2;")
+                                          .arg(msxAccentFill(m_runBtn).name(), msxAccentFillInk(m_runBtn).name())
                                     : QString());
 }
 
@@ -727,7 +936,7 @@ void DebuggerWindow::setEntry(QLineEdit *e, const QString &text)
     if (e->text() != text) e->setText(text);
 }
 
-void DebuggerWindow::refreshCpu()
+void DebuggerWindow::refreshRegs()
 {
     msxdebug_cpu c;
     msxdebug_cpu_get(m_dbg, &c);
@@ -750,30 +959,57 @@ void DebuggerWindow::refreshCpu()
     for (int i = 0; i < 6; ++i) m_flag[i]->setChecked(flags[i] != 0);
     m_iff[0]->setChecked(c.iff1 != 0);
     m_iff[1]->setChecked(c.iff2 != 0);
+    m_haltNote->setText(c.halted ? QStringLiteral("HALT") : QString());
 }
 
+/* The dump from m_memTop, each row labelled once with the region it is in (the
+ * map as of the last refreshSlow); a highlighted range (Go to, a watch, a
+ * search hit) in the accent. */
 void DebuggerWindow::refreshMem()
 {
     static uint8_t mem[MEM_ROWS * 16];
     memset(mem, 0, sizeof mem);
     msxdebug_read(m_dbg, (uint16_t)m_memTop, mem, (int)sizeof mem);
+
     QString t;
-    t.reserve(MEM_ROWS * 80);
+    t.reserve(MEM_ROWS * 90);
     t += QStringLiteral("       ");
     for (int col = 0; col < 16; ++col) t += hx((unsigned)col, 1) + QStringLiteral("  ");
+    char region[64];
+    QString lastRegion;
     for (int row = 0; row < MEM_ROWS; ++row) {
         const uint8_t *r = mem + row * 16;
-        t += QStringLiteral("\n$%1: ").arg(hx((unsigned)(m_memTop + row * 16), 4));
+        const unsigned addr = (unsigned)(m_memTop + row * 16);
+        t += QStringLiteral("\n$%1: ").arg(hx(addr, 4));
         for (int col = 0; col < 16; ++col) t += hx(r[col], 2) + QLatin1Char(' ');
         t += QLatin1Char(' ');
         for (int col = 0; col < 16; ++col) t += QLatin1Char(r[col] >= 0x20 && r[col] < 0x7F ? (char)r[col] : '.');
+        if (!m_regions.empty() && msxmem_region_name(m_regions.data(), (int)m_regions.size(), (uint16_t)addr, region, sizeof region) > 0) {
+            const QString name = unbrace(region);
+            if (name != lastRegion) t += QStringLiteral("  ; ") + name;
+            lastRegion = name;
+        }
     }
     setText(m_mem, t);
 
-    /* the row Go to found stays marked across refreshes */
+    /* the bytes Go to found stay marked across refreshes */
     QList<QTextEdit::ExtraSelection> sel;
-    if (m_memMark >= m_memTop && m_memMark < m_memTop + MEM_ROWS * 16)
-        sel << lineSelection(m_mem, 1 + (m_memMark - m_memTop) / 16, accentFormat());
+    if (m_memHl) {
+        for (int row = 0; row < MEM_ROWS; ++row) {
+            const QTextBlock block = m_mem->document()->findBlockByNumber(1 + row);
+            if (!block.isValid()) break;
+            for (int col = 0; col < 16; ++col) {
+                const int addr = m_memTop + row * 16 + col;
+                if (addr < m_memHlLo || addr > m_memHlHi) continue;
+                QTextEdit::ExtraSelection mark;
+                mark.cursor = QTextCursor(m_mem->document());
+                mark.cursor.setPosition(block.position() + 7 + col * 3);
+                mark.cursor.setPosition(block.position() + 7 + col * 3 + 2, QTextCursor::KeepAnchor);
+                mark.format = accentFormat(m_mem);
+                sel << mark;
+            }
+        }
+    }
     m_mem->setExtraSelections(sel);
 }
 
@@ -848,43 +1084,11 @@ void DebuggerWindow::refreshDisasm()
     }
     /* the PC's line in the accent colour, last so its ink wins */
     if (pcLine >= 0) {
-        QTextCharFormat f = accentFormat();
+        QTextCharFormat f = accentFormat(m_disasm);
         if (lines[pcLine].address == m_selected) f.setFontUnderline(true);
         sel << lineSelection(m_disasm, pcLine, f);
     }
     m_disasm->setExtraSelections(sel);
-}
-
-void DebuggerWindow::refreshVdp()
-{
-    static msxvdp_snapshot snap;
-    static uint8_t nt[256 * 192 * 4], pat[256 * 64 * 4], spr[128 * 64 * 4], pal[MSXVDP_PAL_W * MSXVDP_PAL_H * 4];
-    msxvdp_sprite info[32];
-
-    m_chip = chipFromMachine(msxsession_machine(m_session));
-    msxdebug_vdp_snapshot(m_dbg, m_chip, &snap);
-
-    msxvdp_render_nametable(&snap, nt);
-    m_nt->setPixmap(QPixmap::fromImage(QImage(nt, 256, 192, 256 * 4, QImage::Format_RGBA8888)));
-    msxvdp_render_patterns(&snap, m_patBank->currentIndex(), pat);
-    m_pat->setPixmap(QPixmap::fromImage(QImage(pat, 256, 64, 256 * 4, QImage::Format_RGBA8888)));
-    msxvdp_render_sprites(&snap, spr, info);
-    m_spr->setPixmap(QPixmap::fromImage(QImage(spr, 128, 64, 128 * 4, QImage::Format_RGBA8888)));
-    msxvdp_render_palette(&snap, pal);
-    m_pal->setPixmap(QPixmap::fromImage(
-        QImage(pal, MSXVDP_PAL_W, MSXVDP_PAL_H, MSXVDP_PAL_W * 4, QImage::Format_RGBA8888)));
-
-    QString text = QStringLiteral("##  Y    X  PAT CLR EC\n");
-    for (int i = 0; i < 32; i++)
-        text += QStringLiteral("%1 %2 %3  %4  %5  %6\n").arg(i, 2).arg(info[i].y, 4).arg(info[i].x, 4)
-                    .arg(info[i].pattern, 3, 16).arg(info[i].color, 3).arg(info[i].early_clock);
-    setText(m_spriteInfo, text);
-
-    static char state[4096];
-    msxvdp_format_state(&snap, state, int(sizeof state));
-    setText(m_vdpState, QString::fromLatin1(state));
-    msxvdp_format_hex(&snap, m_vramBase, VRAM_ROWS, state, int(sizeof state));
-    setText(m_vramView, QString::fromLatin1(state));
 }
 
 void DebuggerWindow::refreshBps()
@@ -892,12 +1096,17 @@ void DebuggerWindow::refreshBps()
     static msxdebug_breakpoint bps[BP_MAX];
     const int n = msxdebug_breakpoint_list(m_dbg, bps, BP_MAX);
 
+    /* what stopped the machine, in the core's words */
+    msxdebug_snapshot snap;
+    msxdebug_stop_snapshot(m_dbg, &snap);
+    m_bpStop->setText(snap.paused ? QStringLiteral("Stopped: %1").arg(stripControl(snap.text)) : QStringLiteral("Running."));
+
     /* rebuilt only when it changed (each step refreshes), and never while a
      * row's own button is being handled */
     QString sig;
-    for (int i = 0; i < n; ++i)
-        sig += QStringLiteral("%1 %2 %3 %4 %5 %6 %7 %8\n").arg(bps[i].id).arg(bps[i].enabled).arg(bps[i].hits)
-                   .arg(bps[i].type).arg(bps[i].start).arg(bps[i].end).arg(QString::fromUtf8(bps[i].condition), QString());
+    for (int idx = 0; idx < n; ++idx)
+        sig += QStringLiteral("%1 %2 %3 %4 %5 %6 %7\n").arg(bps[idx].id).arg(bps[idx].enabled).arg(bps[idx].hits)
+                   .arg(bps[idx].type).arg(bps[idx].start).arg(bps[idx].end).arg(QString::fromUtf8(bps[idx].condition));
     if (sig == m_bpSig && m_bpTable->rowCount() == n) return;
     m_bpSig = sig;
 
@@ -906,50 +1115,298 @@ void DebuggerWindow::refreshBps()
     mono.setStyleHint(QFont::TypeWriter);
     m_bpFilling = true;
     m_bpTable->setRowCount(n);
-    for (int i = 0; i < n; ++i) {
+    for (int idx = 0; idx < n; ++idx) {
         auto *on = new QTableWidgetItem;
         on->setFlags(Qt::ItemIsUserCheckable | Qt::ItemIsEnabled);
-        on->setCheckState(bps[i].enabled ? Qt::Checked : Qt::Unchecked);
-        on->setData(Qt::UserRole, bps[i].id);
+        on->setCheckState(bps[idx].enabled ? Qt::Checked : Qt::Unchecked);
+        on->setData(Qt::UserRole, bps[idx].id);
         on->setToolTip(QStringLiteral("Enabled"));
-        m_bpTable->setItem(i, 0, on);
+        m_bpTable->setItem(idx, 0, on);
         QStringList type;
-        if (bps[i].type & MSXDEBUG_BP_EXEC) type << QStringLiteral("exec");
-        if (bps[i].type & MSXDEBUG_BP_READ) type << QStringLiteral("read");
-        if (bps[i].type & MSXDEBUG_BP_WRITE) type << QStringLiteral("write");
-        if (bps[i].type & MSXDEBUG_BP_IN) type << QStringLiteral("in");
-        if (bps[i].type & MSXDEBUG_BP_OUT) type << QStringLiteral("out");
-        m_bpTable->setItem(i, 1, new QTableWidgetItem(type.join(QLatin1Char('/'))));
+        if (bps[idx].type == MSXDEBUG_BP_ACCESS) {
+            type << QStringLiteral("access");
+        } else {
+            if (bps[idx].type & MSXDEBUG_BP_EXEC) type << QStringLiteral("exec");
+            if (bps[idx].type & MSXDEBUG_BP_READ) type << QStringLiteral("read");
+            if (bps[idx].type & MSXDEBUG_BP_WRITE) type << QStringLiteral("write");
+            if (bps[idx].type & MSXDEBUG_BP_IN) type << QStringLiteral("in");
+            if (bps[idx].type & MSXDEBUG_BP_OUT) type << QStringLiteral("out");
+        }
+        auto *typeItem = new QTableWidgetItem(type.join(QLatin1Char('/')));
+        char desc[256];
+        msxbp_describe(m_dbg, &bps[idx], desc, sizeof desc);
+        typeItem->setToolTip(stripControl(desc));
+        m_bpTable->setItem(idx, 1, typeItem);
         /* a port range for in/out is two digits */
-        const int digits = (bps[i].type & (MSXDEBUG_BP_IN | MSXDEBUG_BP_OUT)) ? 2 : 4;
-        QString range = QStringLiteral("$") + hx(bps[i].start, digits);
-        if (bps[i].end != bps[i].start) range += QStringLiteral("-$") + hx(bps[i].end, digits);
-        m_bpTable->setItem(i, 2, new QTableWidgetItem(range));
-        m_bpTable->setItem(i, 3, new QTableWidgetItem(stripControl(bps[i].condition)));
-        m_bpTable->setItem(i, 4, new QTableWidgetItem(QString::number(bps[i].hits)));
-        for (int col = 1; col < 5; ++col) m_bpTable->item(i, col)->setFont(mono);
+        const int digits = (bps[idx].type & (MSXDEBUG_BP_IN | MSXDEBUG_BP_OUT)) ? 2 : 4;
+        QString range = QStringLiteral("$") + hx(bps[idx].start, digits);
+        if (bps[idx].end != bps[idx].start) range += QStringLiteral("-$") + hx(bps[idx].end, digits);
+        m_bpTable->setItem(idx, 2, new QTableWidgetItem(range));
+        m_bpTable->setItem(idx, 3, new QTableWidgetItem(stripControl(bps[idx].condition)));
+        m_bpTable->setItem(idx, 4, new QTableWidgetItem(QString::number(bps[idx].hits)));
+        for (int col = 1; col < 5; ++col) m_bpTable->item(idx, col)->setFont(mono);
         auto *rm = new QToolButton;
         rm->setIcon(QIcon::fromTheme(QStringLiteral("edit-delete"), QIcon::fromTheme(QStringLiteral("user-trash"))));
         if (rm->icon().isNull()) rm->setText(QStringLiteral("Remove"));
         rm->setAutoRaise(true);
         rm->setToolTip(QStringLiteral("Remove"));
-        const int id = bps[i].id;
-        connect(rm, &QToolButton::clicked, this, [this, id] {
-            msxdebug_breakpoint_remove(m_dbg, id);
+        const int bpid = bps[idx].id;
+        connect(rm, &QToolButton::clicked, this, [this, bpid] {
+            msxdebug_breakpoint_remove(m_dbg, bpid);
             syncLater();
         });
-        m_bpTable->setCellWidget(i, 5, rm);
+        m_bpTable->setCellWidget(idx, 5, rm);
     }
     m_bpFilling = false;
     m_bpEmpty->setVisible(n == 0);
 }
 
-void DebuggerWindow::refreshIo()
+void DebuggerWindow::refreshWatches()
 {
-    static char text[8192];
-    text[0] = '\0';
-    msxdebug_io_state(m_dbg, text, sizeof text);
-    setText(m_io, stripControl(text));
+    const int count = msxwatch_count();
+    const int keep = m_wtList->currentRow();
+    QStringList rows;
+    for (int idx = 0; idx < count; ++idx) {
+        char line[256];
+        msxwatch_format(m_dbg, idx, line, sizeof line);
+        rows << stripControl(line);
+    }
+    /* unchanged: leave the list alone (a click in it must not be lost) */
+    bool same = m_wtList->count() == count;
+    for (int idx = 0; same && idx < count; ++idx) same = m_wtList->item(idx)->text() == rows[idx];
+    if (same) return;
+    m_wtList->clear();
+    m_wtList->addItems(rows);
+    if (keep >= 0 && keep < count) m_wtList->setCurrentRow(keep);
+}
+
+/* The machine, its memory map and its I/O, from the structured getters (valid
+ * while stopped; a running machine shows the last stop). */
+void DebuggerWindow::refreshCart()
+{
+    static msxdebug_io ioinfo;
+    msxdebug_cart cart;
+    msxdebug_region map[16];
+    QString top, bottom;
+
+    msxdebug_snapshot snap;
+    msxdebug_stop_snapshot(m_dbg, &snap);
+    m_cartSerial = snap.serial;
+    msxdebug_cart_info(m_dbg, &cart);
+    top += QStringLiteral("Machine\n");
+    top += QStringLiteral("  %1 (%2), Z80 at %3 Hz\n").arg(QString::fromUtf8(cart.machine), QString::fromUtf8(cart.type)).arg(cart.z80_hz);
+    top += QStringLiteral("  FujiNet cartridge: %1\n")
+               .arg(!cart.fujinet ? QStringLiteral("not in a slot")
+                                  : QStringLiteral("in a slot, link %1%2")
+                                        .arg(cart.fujinet_link ? QStringLiteral("up") : QStringLiteral("down"),
+                                             cart.fujinet_external ? QStringLiteral(" (external FujiNet)") : QString()));
+    top += QStringLiteral("  Sound chips: PSG, SCC %1, MSX-MUSIC %2, MSX-AUDIO %3     Memory mapper: %4\n")
+               .arg(yesNo(cart.scc), yesNo(cart.music), yesNo(cart.audio), yesNo(cart.mapper));
+    top += QStringLiteral("  Devices: %1\n").arg(unbrace(cart.devices));
+    top += QStringLiteral("\nMemory map\n");
+    const int regions = msxdebug_memory_map(m_dbg, map, 16);
+    if (!regions) top += QStringLiteral("  Stop the machine to read its memory map.\n");
+    for (int idx = 0; idx < regions; ++idx)
+        top += QStringLiteral("  %1-%2  %3%4  %5\n")
+                   .arg(hx(map[idx].lo, 4), hx(map[idx].hi, 4))
+                   .arg(map[idx].readable ? QLatin1Char('r') : QLatin1Char('-'))
+                   .arg(map[idx].writable ? QLatin1Char('w') : QLatin1Char('-'))
+                   .arg(unbrace(map[idx].name));
+    setText(m_cartText, stripControl(top.toUtf8().constData()));
+
+    if (!msxdebug_io_get(m_dbg, &ioinfo) || !ioinfo.valid) {
+        setText(m_ioText, QStringLiteral("No machine running."));
+        return;
+    }
+    bottom += QStringLiteral("Selected slots (CPU pages)\n");
+    for (int page = 0; page < 4; ++page) {
+        const QString slot = ioinfo.page_subslot[page] < 0
+                                 ? QString::number(ioinfo.page_slot[page])
+                                 : QStringLiteral("%1-%2").arg(ioinfo.page_slot[page]).arg(ioinfo.page_subslot[page]);
+        bottom += QStringLiteral("  page %1 ($%2): slot %3  %4\n").arg(page).arg(hx(unsigned(page) * 0x4000, 4))
+                      .arg(slot, unbrace(ioinfo.page_device[page]));
+    }
+    for (int slot = 0; slot < 4; ++slot)
+        if (ioinfo.expanded[slot])
+            bottom += QStringLiteral("  slot %1 is expanded%2\n").arg(slot)
+                          .arg(ioinfo.subslot_reg[slot] >= 0 ? QStringLiteral(", sub-slot register $%1").arg(hx(unsigned(ioinfo.subslot_reg[slot]), 2))
+                                                             : QString());
+    bottom += QStringLiteral("\nPPI  $A8 slot select %1   $A9 keyboard column %2   $AA %3   $AB control %4\n")
+                  .arg(hx(ioinfo.ppi[0], 2), hx(ioinfo.ppi[1], 2), hx(ioinfo.ppi[2], 2), hx(ioinfo.ppi[3], 2));
+    if (ioinfo.mapper)
+        bottom += QStringLiteral("Memory mapper ($FC-$FF): %1 %2 %3 %4\n").arg(hx(ioinfo.mapper_reg[0], 2), hx(ioinfo.mapper_reg[1], 2),
+                                                                              hx(ioinfo.mapper_reg[2], 2), hx(ioinfo.mapper_reg[3], 2));
+    for (int idx = 0; idx < ioinfo.rom_mappers; ++idx) {
+        bottom += QStringLiteral("ROM mapper %1: blocks at $0000-$E000:").arg(unbrace(ioinfo.rom[idx].device));
+        for (int win = 0; win < 8; ++win)
+            bottom += ioinfo.rom[idx].block[win] == 255 ? QStringLiteral(" --") : QStringLiteral(" %1").arg(hx(ioinfo.rom[idx].block[win], 2));
+        bottom += QLatin1Char('\n');
+    }
+    bottom += QStringLiteral("\nKeyboard matrix (0 = pressed), %1 rows:").arg(ioinfo.keymatrix_rows);
+    for (int row = 0; row < ioinfo.keymatrix_rows && row < 16; ++row)
+        bottom += QStringLiteral(" %1").arg(hx(ioinfo.keymatrix[row], 2));
+    bottom += QStringLiteral("\nJoystick ports (bit set = not pressed): A %1   B %2\n")
+                  .arg(hx(ioinfo.joyport[0], 2), hx(ioinfo.joyport[1], 2));
+    bottom += QStringLiteral("\nopenMSX slotmap\n%1\n").arg(QString::fromUtf8(ioinfo.slotmap));
+    setText(m_ioText, stripControl(bottom.toUtf8().constData()));
+}
+
+/* Trace (which 0: the newest instructions, live) and History (1: what ran
+ * before the stop). Both read the one ring; the filter and the note are the
+ * tab's own. */
+void DebuggerWindow::refreshTrace(int which, bool force)
+{
+    static msxdebug_trace buf[HIST_FETCH];
+    const bool live = which == 0;
+    const bool stopped = msxdebug_is_stopped(m_dbg) != 0;
+    const bool traceOn = msxdebug_trace_enabled(m_dbg) != 0, histOn = msxdebug_history_enabled(m_dbg) != 0;
+    const bool recording = live ? traceOn : histOn;
+    const uint64_t total = live ? msxdebug_trace_total(m_dbg) : msxdebug_history_count(m_dbg);
+    uint16_t first = 0, last = 0xFFFF;
+    int filter = MSXDEBUG_TRACE_ALL;
+
+    m_hSync = true;      /* the two Record buttons follow the engine */
+    m_hRec[0]->setChecked(traceOn);
+    m_hRec[1]->setChecked(histOn);
+    m_hSync = false;
+
+    if (!force && total == m_hSeen[which] && (live || stopped)) return;
+    m_hSeen[which] = total;
+    if (!live && !stopped) {
+        m_hNote[which]->setText(QStringLiteral("Stop the machine to read its history."));
+        return;
+    }
+    switch (m_hFilter[which]->currentIndex()) {
+    case 1: filter = MSXDEBUG_TRACE_BRANCHES; break;
+    case 2:
+        if (msxsym_parse_range(m_dbg, m_hRange[which]->text().toUtf8().constData(), &first, &last)) filter = MSXDEBUG_TRACE_RANGE;
+        break;
+    default: break;
+    }
+    QList<int> hit;
+    int fetched = 0;
+    if (live) {
+        fetched = msxdebug_trace_read(m_dbg, buf, HIST_FETCH);                /* newest first */
+        for (int idx = 0; idx < fetched && hit.size() < HIST_SHOWN; ++idx)
+            if (msxdebug_trace_match(&buf[idx], filter, first, last)) hit.append(idx);
+    } else {
+        fetched = msxdebug_history_copy(m_dbg, buf, HIST_FETCH);              /* oldest first */
+        for (int idx = fetched - 1; idx >= 0 && hit.size() < HIST_SHOWN; --idx)   /* the newest matches, scanning back */
+            if (msxdebug_history_match(&buf[idx], filter, first, last)) hit.append(idx);
+    }
+    QString text;
+    if (!recording && fetched == 0)
+        text = QStringLiteral("%1 is off. Press Record, then let the machine run.").arg(live ? QStringLiteral("Trace") : QStringLiteral("History"));
+    for (int pos = hit.size() - 1; pos >= 0; --pos) {      /* oldest first */
+        char line[320];
+        if (live) msxdebug_trace_format(&buf[hit[pos]], line, sizeof line);
+        else msxdebug_history_format(&buf[hit[pos]], line, sizeof line);
+        text += stripControl(line);
+        text += QLatin1Char('\n');
+    }
+    setText(m_hText[which], text, true);
+    m_hNote[which]->setText(QStringLiteral("%1%2 instructions recorded, last %3 shown")
+                                .arg(recording ? QStringLiteral("Recording. ") : QString()).arg(total).arg(hit.size()));
+}
+
+void DebuggerWindow::refreshVideo(bool force)
+{
+    if (m_video) m_video->refresh(force || m_videoForce);
+    m_videoForce = false;
+}
+
+/* The PSG, and the SCC, MSX-MUSIC and MSX-AUDIO chips the machine has, read
+ * straight out of openMSX (stopped only). */
+void DebuggerWindow::refreshSound()
+{
+    static msxdebug_sound snd;
+    if (!msxdebug_is_stopped(m_dbg)) {
+        setText(m_soundText, QStringLiteral("Stop the machine to read the sound chips."));
+        return;
+    }
+    QString text;
+    if (!msxdebug_sound_get(m_dbg, &snd)) {
+        setText(m_soundText, QStringLiteral("No machine running."));
+        return;
+    }
+    if (snd.psg.present) {
+        const msxdebug_psg &psg = snd.psg;
+        text += QStringLiteral("PSG, AY-3-8910 ($A0-$A2)\n");
+        for (int voice = 0; voice < 3; ++voice)
+            text += QStringLiteral("  %1  period %2  tone %3  noise %4  level %5%6  %7\n")
+                     .arg(QLatin1Char(char('A' + voice)))
+                     .arg(psg.period[voice], 4)
+                     .arg(onOff(psg.tone_on[voice]), onOff(psg.noise_on[voice]))
+                     .arg(psg.level[voice], 2)
+                     .arg(psg.envelope[voice] ? QStringLiteral(" (envelope)") : QString())
+                     .arg(psg.tone_on[voice] && psg.period[voice] > 0 ? noteName(psg.freq[voice]) : QStringLiteral("-"));
+        text += QStringLiteral("  Noise period %1   Envelope period %2, shape %3\n")
+                 .arg(psg.noise_period).arg(psg.env_period).arg(hx(unsigned(psg.env_shape), 1));
+        text += QStringLiteral("  Registers:");
+        for (int reg = 0; reg < 16; ++reg) text += QStringLiteral(" R%1=%2").arg(hx(unsigned(reg), 1), hx(psg.reg[reg], 2));
+        text += QStringLiteral("\n  (the mixer, R7, is active-low: a set bit turns that voice off; R14/R15 are the joystick ports)\n");
+    }
+    if (snd.scc.present) {
+        const msxdebug_scc &scc = snd.scc;
+        text += QStringLiteral("\nSCC, %1\n").arg(QString::fromUtf8(scc.name));
+        for (int chan = 0; chan < 5; ++chan) {
+            text += QStringLiteral("  %1  period %2  volume %3  %4  %5\n  wave:")
+                     .arg(chan + 1).arg(scc.period[chan], 4).arg(scc.volume[chan], 2)
+                     .arg(scc.enabled[chan] ? QStringLiteral("on ") : QStringLiteral("off"))
+                     .arg(scc.enabled[chan] && scc.period[chan] > 0 ? noteName(scc.freq[chan]) : QStringLiteral("-"));
+            for (int pos = 0; pos < 32; ++pos) text += QStringLiteral(" %1").arg(hx(scc.wave[chan][pos], 2));
+            text += QLatin1Char('\n');
+        }
+    }
+    if (snd.opll.present) {
+        const msxdebug_opll &opll = snd.opll;
+        text += QStringLiteral("\nMSX-MUSIC, %1%2\n").arg(QString::fromUtf8(opll.name),
+                                                    opll.rhythm ? QStringLiteral("  (rhythm mode)") : QString());
+        for (int chan = 0; chan < 9; ++chan)
+            text += QStringLiteral("  %1  F-number %2  block %3  key %4  instrument %5  volume %6  %7\n")
+                     .arg(chan + 1).arg(opll.fnum[chan], 3).arg(opll.block[chan]).arg(onOff(opll.key_on[chan]))
+                     .arg(opll.instrument[chan], 2).arg(opll.volume[chan], 2)
+                     .arg(opll.key_on[chan] ? noteName(opll.freq[chan]) : QStringLiteral("-"));
+    }
+    if (snd.y8950.present) {
+        const msxdebug_y8950 &y8950 = snd.y8950;
+        text += QStringLiteral("\nMSX-AUDIO, %1\n  Registers:").arg(QString::fromUtf8(y8950.name));
+        for (int reg = 0; reg < 256; ++reg) {
+            if (reg % 16 == 0) text += QStringLiteral("\n  %1:").arg(hx(unsigned(reg), 2));
+            text += QStringLiteral(" %1").arg(hx(y8950.reg[reg], 2));
+        }
+        text += QLatin1Char('\n');
+    }
+    QStringList absent;
+    if (!snd.scc.present) absent << QStringLiteral("SCC");
+    if (!snd.opll.present) absent << QStringLiteral("MSX-MUSIC");
+    if (!snd.y8950.present) absent << QStringLiteral("MSX-AUDIO");
+    if (!absent.isEmpty()) text += QStringLiteral("\nNot on this machine: %1\n").arg(absent.join(QStringLiteral(", ")));
+    setText(m_soundText, text);
+}
+
+/* Only rebuilt when the list or the filter changed: a real game .sym can be
+ * a few hundred entries. force: whatever the tab shows, on first open too. */
+void DebuggerWindow::refreshSymbols(bool force)
+{
+    const int total = msxdebug_symbols_count(m_dbg);
+    const QString filter = m_symFilter->text();
+    if (!force && total == m_symTotal && filter == m_symShownFilter) return;
+    m_symTotal = total;
+    m_symShownFilter = filter;
+    std::vector<int> found((size_t)qMax(total, 1));
+    const int shown = msxdebug_symbols_filter(m_dbg, filter.toUtf8().constData(), found.data(), (int)found.size());
+    m_symList->clear();
+    for (int idx = 0; idx < shown; ++idx) {
+        uint16_t addr;
+        char name[96];
+        if (!msxdebug_symbols_get(m_dbg, found[(size_t)idx], &addr, name, sizeof name)) continue;
+        auto *item = new QListWidgetItem(QStringLiteral("%1  %2").arg(hx(addr, 4), QString::fromUtf8(name)));
+        item->setData(Qt::UserRole, addr);
+        m_symList->addItem(item);
+    }
+    m_symCount->setText(QStringLiteral("%1 symbol%2%3").arg(shown).arg(shown == 1 ? QString() : QStringLiteral("s"))
+                            .arg(filter.isEmpty() ? QString() : QStringLiteral(" (filtered)")));
 }
 
 /* The packet log is rebuilt only when it changed: a new packet, or a
@@ -993,38 +1450,71 @@ void DebuggerWindow::refreshFujinet(bool force)
 
 /* One tab; live is the twice-a-second refresh while the machine runs, which
  * leaves out what only changes at a stop. */
-void DebuggerWindow::refreshPage(int page, bool live)
+void DebuggerWindow::refreshTab(int tab, bool live)
 {
-    switch (page) {
-    case TAB_CPU: refreshCpu(); refreshMem(); break;
+    switch (tab) {
     case TAB_DISASM: if (!live) refreshDisasm(); break;
-    case TAB_VDP: refreshVdp(); break;
+    case TAB_MEMORY: refreshMem(); if (!live) scheduleSlow(!m_regions.empty()); break;
     case TAB_BREAKS: refreshBps(); break;
-    case TAB_IO: refreshIo(); break;
+    case TAB_WATCHES: refreshWatches(); break;
+    case TAB_CART: if (!live) scheduleSlow(m_cartSerial != ~0ull); break;
+    case TAB_TRACE: refreshTrace(0, !live); break;
+    case TAB_HISTORY: if (!live) refreshTrace(1, true); break;
+    case TAB_VIDEO: refreshVideo(!live); break;
+    case TAB_SOUND: if (!live) refreshSound(); break;
+    case TAB_SYMBOLS: refreshSymbols(!live); break;
     case TAB_FUJINET: refreshFujinet(false); break;
     default: break;
     }
 }
 
+/* What costs openMSX most of a second to answer (the memory map, the whole of
+ * Cart & I/O): read for the stop that is current. While stepping the old
+ * answer stays until the stepping pauses (scheduleSlow); a tab just opened
+ * does not wait. */
+void DebuggerWindow::refreshSlow()
+{
+    msxdebug_snapshot snap;
+    msxdebug_stop_snapshot(m_dbg, &snap);
+    if (!snap.paused) return;
+    if (tabVisible(TAB_MEMORY) && (m_regions.empty() || m_regionSerial != snap.serial)) {
+        msxdebug_region map[16];
+        const int count = msxdebug_memory_map(m_dbg, map, 16);
+        m_regions.assign(map, map + qMax(0, count));
+        m_regionSerial = snap.serial;
+        refreshMem();
+    }
+    if (tabVisible(TAB_CART) && m_cartSerial != snap.serial) refreshCart();
+}
+
+void DebuggerWindow::scheduleSlow(bool haveOld)
+{
+    if (haveOld && !m_slowNow) m_slowTimer.start(500);       /* restarts: it fires when the stops stop */
+    else refreshSlow();
+}
+
+/* Every tab that is on screen (the one showing, and any peeled off). */
 void DebuggerWindow::refreshAll()
 {
-    refreshStatus();
-    refreshPage(m_tabs->currentIndex(), false);
+    msxdebug_snapshot snap;
+    msxdebug_stop_snapshot(m_dbg, &snap);
+    refreshStatus(snap);
+    refreshRegs();
+    for (int tab = 0; tab < TAB_COUNT; ++tab)
+        if (tabVisible(tab)) refreshTab(tab, false);
 }
 
 /* After anything that may have moved the engine: the console notes a new
- * stop, then the tab showing follows. */
+ * stop, then the tabs showing follow. */
 void DebuggerWindow::resync()
 {
-    const bool stopped = msxdebug_is_stopped(m_dbg) != 0;
-    if (stopped && !m_wasStopped) {
-        char reason[160];
-        int addr;
-        reason[0] = '\0';
-        msxdebug_stop_reason(m_dbg, reason, sizeof reason, &addr);
-        if (reason[0]) consoleAppend(QStringLiteral("— %1\n").arg(stripControl(reason)));
-    }
-    m_wasStopped = stopped;
+    msxdebug_snapshot snap;
+    msxdebug_stop_snapshot(m_dbg, &snap);
+    /* a step is its own answer; anything else that stopped the machine is news */
+    if (snap.paused && snap.serial != m_seenSerial && snap.stop.reason != MSXDEBUG_STOP_STEP && snap.text[0])
+        consoleAppend(QStringLiteral("— %1\n").arg(stripControl(snap.text)));
+    m_wasStopped = snap.paused != 0;
+    m_seenSerial = snap.serial;
     m_seenGen = msxdebug_generation(m_dbg);
     m_runningTicks = 0;
     refreshAll();
@@ -1044,20 +1534,31 @@ void DebuggerWindow::settleAndSync()
     resync();
 }
 
-/* The engine reports a stop only through the generation (its stop callback
- * fires off the UI thread), so this polls it: a refresh when it moved, and
- * the live values twice a second while the machine runs. */
+/* The engine reports a stop only through the stop snapshot (its stop
+ * callback fires off the UI thread), so this polls it: a refresh when it
+ * moved, and the live values while the machine runs. */
 void DebuggerWindow::tick()
 {
     if (!isVisible()) return;
+    msxdebug_snapshot snap;
+    msxdebug_stop_snapshot(m_dbg, &snap);
     const unsigned gen = msxdebug_generation(m_dbg);
-    const bool stopped = msxdebug_is_stopped(m_dbg) != 0;
-    if (gen != m_seenGen || stopped != m_wasStopped) {
+    const bool stopped = snap.paused != 0;
+    if (snap.serial != m_seenSerial || gen != m_seenGen || stopped != m_wasStopped) {
         resync();
-    } else if (!stopped && ++m_runningTicks >= 5) {
+        return;
+    }
+    if (stopped) return;
+    ++m_runningTicks;
+    /* a running machine publishes a frame, and the ring a record, all the time */
+    if (m_runningTicks % 2 == 0 && tabVisible(TAB_VIDEO)) refreshVideo(false);
+    if (m_runningTicks % 4 == 0 && tabVisible(TAB_TRACE)) refreshTrace(0, false);
+    if (m_runningTicks >= 5) {
         m_runningTicks = 0;
-        refreshStatus();
-        refreshPage(m_tabs->currentIndex(), true);
+        refreshStatus(snap);
+        refreshRegs();
+        for (int tab = 0; tab < TAB_COUNT; ++tab)
+            if (tabVisible(tab) && tab != TAB_VIDEO && tab != TAB_TRACE) refreshTab(tab, true);
     }
 }
 
@@ -1173,65 +1674,173 @@ void DebuggerWindow::toggleSelected()
     toggleBreakpoint(m_selected);
 }
 
-/* A label, or a number as parseNum reads it. */
+/* A number the way the prompt takes it: a bare token of hex digits is hex (as
+ * the register and value entries always were), anything else goes to the
+ * engine's expression evaluator ($C000, 49152, a label, hl + 1 ...). */
+bool DebuggerWindow::numberOf(const QString &text, long *out, QString *why)
+{
+    static const QRegularExpression hexOnly(QStringLiteral("^[0-9A-Fa-f]{1,8}$"));
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) {
+        if (why) *why = QStringLiteral("Type a value");
+        return false;
+    }
+    if (hexOnly.match(trimmed).hasMatch()) {
+        *out = trimmed.toLong(nullptr, 16);
+        return true;
+    }
+    char err[160] = "";
+    if (msxdebug_eval(m_dbg, trimmed.toUtf8().constData(), out, err, int(sizeof err)) == 0) return true;
+    if (why) *why = stripControl(err);
+    return false;
+}
+
+/* A label, or a number as numberOf reads it. */
 bool DebuggerWindow::addressOf(const QString &text, long *out)
 {
     const int lbl = msxdebug_label_address(m_dbg, text.trimmed().toUtf8().constData());
     if (lbl >= 0) { *out = lbl; return true; }
-    return parseNum(text, out);
+    return numberOf(text, out, nullptr);
+}
+
+/* One bulk write of every register: the entry changes the engine's copy, the
+ * engine says if it will not take it (running, IM above 2). */
+void DebuggerWindow::applyCpu(const msxdebug_cpu &cpu, const QString &okMessage)
+{
+    char err[160] = "";
+    if (msxdebug_regs_set(m_dbg, &cpu, err, sizeof err)) message(okMessage);
+    else message(err[0] ? stripControl(err) : QStringLiteral("The registers could not be written"));
 }
 
 /* Edits go in only while the machine is stopped. */
-void DebuggerWindow::setReg(int i)
+void DebuggerWindow::setReg(int idx)
 {
-    long v;
-    QLineEdit *e = m_reg[i];
-    if (!msxdebug_is_stopped(m_dbg)) message(QStringLiteral("Stop the machine first"));
-    else if (!parseNum(e->text(), &v)) message(QStringLiteral("Not a number (hex, or # decimal)"));
-    else msxdebug_cpu_set(m_dbg, kRegs[i].id, (int)v);
-    e->clearFocus();
-    resync();
-}
-
-void DebuggerWindow::setFlag(int id, bool on)
-{
-    if (!msxdebug_is_stopped(m_dbg)) message(QStringLiteral("Stop the machine first"));
-    else msxdebug_cpu_set(m_dbg, id, on ? 1 : 0);
-    resync();
-}
-
-/* Go to: the dump from just above an address (a number or a label), its row
- * marked and scrolled to. */
-void DebuggerWindow::memGoto()
-{
-    long a;
-    if (!addressOf(m_memGoto->text(), &a) || a < 0 || a > 0xFFFF) {
-        m_memMark = -1;
-        refreshMem();
-        message(QStringLiteral("Not an address ($C000, or a label)"));
-        return;
+    long val = 0;
+    QString why;
+    QLineEdit *edit = m_reg[idx];
+    if (!msxdebug_is_stopped(m_dbg)) {
+        message(QStringLiteral("Stop the machine first"));
+    } else if (!numberOf(edit->text(), &val, &why)) {
+        message(why);
+    } else {
+        msxdebug_cpu cpu;
+        msxdebug_cpu_get(m_dbg, &cpu);
+        const int word = (int)(val & 0xFFFF), byte = (int)(val & 0xFF);
+        switch (kRegs[idx].id) {
+        case MSX_REG_AF: cpu.af = word; break;     case MSX_REG_BC: cpu.bc = word; break;
+        case MSX_REG_DE: cpu.de = word; break;     case MSX_REG_HL: cpu.hl = word; break;
+        case MSX_REG_IX: cpu.ix = word; break;     case MSX_REG_IY: cpu.iy = word; break;
+        case MSX_REG_SP: cpu.sp = word; break;     case MSX_REG_PC: cpu.pc = word; break;
+        case MSX_REG_AF2: cpu.af2 = word; break;   case MSX_REG_BC2: cpu.bc2 = word; break;
+        case MSX_REG_DE2: cpu.de2 = word; break;   case MSX_REG_HL2: cpu.hl2 = word; break;
+        case MSX_REG_I: cpu.i = byte; break;       case MSX_REG_R: cpu.r = byte; break;
+        default: cpu.im = (int)val; break;
+        }
+        /* a CPU in HALT stays halted when its PC is written */
+        applyCpu(cpu, kRegs[idx].id == MSX_REG_PC
+                          ? QStringLiteral("PC set (a CPU in HALT stays halted until an interrupt: run a Frame first)")
+                          : QStringLiteral("%1 set").arg(QString::fromUtf8(kRegs[idx].name)));
     }
-    m_memMark = (int)a;
-    m_memTop = qBound(0, (int)((a > 0x100 ? a - 0x100 : 0) & ~0xFL), 0x10000 - MEM_ROWS * 16);
+    edit->clearFocus();
+    resync();
+}
+
+void DebuggerWindow::setFlag(int mask, bool enabled)
+{
+    if (!msxdebug_is_stopped(m_dbg)) {
+        message(QStringLiteral("Stop the machine first"));
+    } else {
+        msxdebug_cpu cpu;
+        msxdebug_cpu_get(m_dbg, &cpu);
+        cpu.af = enabled ? (cpu.af | mask) : (cpu.af & ~mask);
+        applyCpu(cpu, QStringLiteral("Flag set"));
+    }
+    resync();
+}
+
+void DebuggerWindow::setIff(int which, bool enabled)
+{
+    if (!msxdebug_is_stopped(m_dbg)) {
+        message(QStringLiteral("Stop the machine first"));
+    } else {
+        msxdebug_cpu cpu;
+        msxdebug_cpu_get(m_dbg, &cpu);
+        (which ? cpu.iff2 : cpu.iff1) = enabled ? 1 : 0;
+        applyCpu(cpu, QStringLiteral("IFF%1 set").arg(which + 1));
+    }
+    resync();
+}
+
+/* Shows a range in the Memory tab, highlighted, on a row boundary and a
+ * little above the middle. */
+void DebuggerWindow::showInMemory(uint16_t first, uint16_t last)
+{
+    m_memHl = true;
+    m_memHlLo = first;
+    m_memHlHi = last;
+    m_memTop = qBound(0, (int)((first > 0x100 ? first - 0x100 : 0) & ~0xF), 0x10000 - MEM_ROWS * 16);
     refreshMem();
-    const int line = 1 + (m_memMark - m_memTop) / 16;
+    const int line = 1 + (first - m_memTop) / 16;
     const int shown = m_mem->viewport()->height() / qMax(1, m_mem->fontMetrics().lineSpacing());
     m_mem->verticalScrollBar()->setValue(qMax(0, line - shown * 3 / 10));
 }
 
-void DebuggerWindow::memWrite()
+/* Go to: an address, a label, an expression or lo-hi. */
+void DebuggerWindow::memGoto()
 {
-    long a, v;
-    if (!addressOf(m_memAddr->text(), &a) || a < 0 || a > 0xFFFF) {
+    uint16_t first, last;
+    if (msxsym_parse_range(m_dbg, m_memGoto->text().toUtf8().constData(), &first, &last)) {
+        showInMemory(first, last);
+    } else {
+        m_memHl = false;
+        refreshMem();
+        message(QStringLiteral("Not an address ($C000, a label or first-last)"));
+    }
+}
+
+void DebuggerWindow::memPoke()
+{
+    long addr, val;
+    QString why;
+    if (!msxdebug_is_stopped(m_dbg)) {
+        message(QStringLiteral("Stop the machine first"));
+        return;
+    }
+    if (!addressOf(m_memAddr->text(), &addr) || addr < 0 || addr > 0xFFFF) {
         message(QStringLiteral("Not an address"));
         return;
     }
-    if (!parseNum(m_memVal->text(), &v) || v < 0 || v > 0xFF) {
-        message(QStringLiteral("The value is a byte ($00-$FF)"));
+    if (!numberOf(m_memVal->text(), &val, &why) || val < 0 || val > 0xFF) {
+        message(why.isEmpty() ? QStringLiteral("The value is a byte ($00-$FF)") : why);
         return;
     }
-    msxdebug_write(m_dbg, (uint16_t)a, (uint8_t)v);
+    msxdebug_write(m_dbg, (uint16_t)addr, (uint8_t)val);
+    message(QStringLiteral("Wrote $%1 to $%2").arg(hx((unsigned)val, 2), hx((unsigned)addr, 4)));
     resync();
+}
+
+/* Find Next / Previous: from the highlighted bytes, or the top of the dump. */
+void DebuggerWindow::memSearch(bool backward)
+{
+    uint8_t pat[MSXSEARCH_MAX], mask;
+    int count = 0, flags = 0;
+    uint16_t found;
+    if (!msxsearch_parse(m_srchKind->currentIndex(), m_srchEntry->text().toUtf8().constData(), pat, &count, &mask, &flags)) {
+        m_srchNote->setText(QStringLiteral("Type hex bytes (3E 01) or some text."));
+        return;
+    }
+    if (!msxdebug_is_stopped(m_dbg)) {
+        m_srchNote->setText(QStringLiteral("Stop the machine to search its memory."));
+        return;
+    }
+    const uint16_t from = m_memHl ? (backward ? m_memHlLo : uint16_t(m_memHlLo + 1)) : (uint16_t)m_memTop;
+    const int hit = msxdebug_search_next(m_dbg, pat, count, mask, flags, from, backward ? 1 : 0, &found);
+    if (hit > 0) {
+        m_srchNote->setText(QStringLiteral("Found at $%1").arg(hx(found, 4)));
+        showInMemory(found, uint16_t(found + count - 1));
+    } else {
+        m_srchNote->setText(hit == 0 ? QStringLiteral("Not found.") : QStringLiteral("Stop the machine to search its memory."));
+    }
 }
 
 void DebuggerWindow::jumpTo()
@@ -1248,13 +1857,13 @@ void DebuggerWindow::jumpTo()
 }
 
 /* The type takes an address or label; in and out a port. The end is
- * optional; the condition is a Tcl expression the engine checks. */
+ * optional; the condition is an expression the engine checks. */
 void DebuggerWindow::addBreakpoint()
 {
-    static const int types[5] = { MSXDEBUG_BP_EXEC, MSXDEBUG_BP_READ, MSXDEBUG_BP_WRITE,
+    static const int types[6] = { MSXDEBUG_BP_EXEC, MSXDEBUG_BP_READ, MSXDEBUG_BP_WRITE, MSXDEBUG_BP_ACCESS,
                                   MSXDEBUG_BP_IN, MSXDEBUG_BP_OUT };
-    const int sel = qBound(0, m_bpType->currentIndex(), 4);
-    const bool port = sel >= 3;
+    const int sel = qBound(0, m_bpType->currentIndex(), 5);
+    const bool port = sel >= 4;
     const QString start = m_bpStart->text().trimmed(), end = m_bpEnd->text().trimmed();
     if (start.isEmpty()) return;
     long a, b;
@@ -1281,32 +1890,14 @@ void DebuggerWindow::addBreakpoint()
     resync();
 }
 
-/* One entry does both jobs: an address alone scrolls the dump there, an
- * address followed by hex bytes writes them first ("1800: 41 42 43"). */
-void DebuggerWindow::vramSubmit()
+void DebuggerWindow::addWatch()
 {
-    uint8_t bytes[POKE_MAX];
-    uint32_t addr = 0;
-    const int n = msxvdp_parse_poke(m_vramEntry->text().toUtf8().constData(), &addr, bytes, POKE_MAX);
-    if (n < 0) {
-        m_vramStatus->setText(QStringLiteral("expected: addr [bytes...], e.g. 1800: 41 42"));
+    if (msxwatch_add(m_wtEntry->text().toUtf8().constData()) < 0) {
+        message(QStringLiteral("Type an address, label, expression or lo-hi (the list holds %1)").arg(MSXWATCH_MAX));
         return;
     }
-    if (n > 0) {
-        msxdebug_vdp_write(m_dbg, addr, bytes, n);
-        m_vramStatus->setText(QStringLiteral("wrote %1 byte%2 at $%3").arg(n).arg(n == 1 ? "" : "s").arg(hx(addr, 5)));
-        m_vramEntry->clear();
-    } else {
-        m_vramStatus->setText(QStringLiteral("$%1").arg(hx(addr, 5)));
-    }
-    m_vramBase = addr & ~0xFu;
-    refreshVdp();
-}
-
-void DebuggerWindow::vramPage(int delta)
-{
-    m_vramBase = (uint32_t)qBound<qint64>(0, (qint64)m_vramBase + delta * VRAM_ROWS * 16, (qint64)MSXVDP_VRAM_MAX - VRAM_ROWS * 16);
-    refreshVdp();
+    m_wtEntry->clear();
+    resync();
 }
 
 void DebuggerWindow::loadSymbols()
@@ -1318,6 +1909,7 @@ void DebuggerWindow::loadSymbols()
     char msg[512] = "";
     msxdebug_load_symbols(m_dbg, path.toLocal8Bit().constData(), msg, sizeof msg);
     say(msg[0] ? stripControl(msg) : QStringLiteral("No symbols found"));
+    refreshSymbols(true);
     resync();
 }
 
@@ -1328,6 +1920,79 @@ void DebuggerWindow::save(const char *kind, const QString &title, const QString 
     char msg[512] = "";
     msxdebug_save(m_dbg, kind, path.toLocal8Bit().constData(), msg, sizeof msg);
     say(msg[0] ? stripControl(msg) : QStringLiteral("Saved %1").arg(path));
+}
+
+/* ---- tabs peeled off into windows of their own --------------------------------- */
+
+/* A page's place in the tab widget is not its identity once tabs can be
+ * moved into windows of their own: each carries its original index. */
+int DebuggerWindow::currentTab() const
+{
+    QWidget *page = m_tabs->currentWidget();
+    return page ? page->property("tab").toInt() : -1;
+}
+
+/* On screen: the tab widget's page, or a window of its own. */
+bool DebuggerWindow::tabVisible(int tab) const
+{
+    return currentTab() == tab || m_popped[tab] != nullptr;
+}
+
+/* Brings a tab forward, wherever it lives. */
+void DebuggerWindow::showTab(int tab)
+{
+    if (m_popped[tab]) {
+        m_popped[tab]->activateWindow();
+        m_popped[tab]->raise();
+    } else {
+        m_tabs->setCurrentWidget(m_pages[tab]);
+    }
+}
+
+void DebuggerWindow::popOut(int tab)
+{
+    if (tab < 0 || tab >= TAB_COUNT || m_popped[tab] || m_tabs->count() <= 1) return;   /* one tab always stays */
+    QWidget *page = m_pages[tab];
+    m_tabs->removeTab(m_tabs->indexOf(page));
+
+    auto *win = new PopWindow;
+    win->setAttribute(Qt::WA_DeleteOnClose);
+    win->setWindowTitle(QStringLiteral("Debugger – %1").arg(QString::fromUtf8(kTabs[tab].label)));
+    win->setProperty("msxHelpContext", QStringLiteral("debugger/%1").arg(QLatin1String(kTabs[tab].name)));
+    auto *layout = new QVBoxLayout(win);
+    auto *bar = new QHBoxLayout;
+    auto *dockBtn = new QPushButton(QStringLiteral("Dock"));
+    dockBtn->setToolTip(QStringLiteral("Put this tab back in the debugger"));
+    bar->addWidget(dockBtn);
+    bar->addStretch();
+    layout->addLayout(bar);
+    layout->addWidget(page, 1);
+    page->show();
+    win->resize(760, 520);
+    m_popped[tab] = win;
+    win->onClose = [this, tab] {
+        if (!m_closing) dock(tab);
+    };
+    win->onKey = [this](QKeyEvent *evt) { return handleKey(evt); };
+    connect(dockBtn, &QPushButton::clicked, win, &QWidget::close);
+    new QShortcut(QKeySequence(Qt::Key_F1), win, [win] { msxHelpFor(win); });
+    win->show();
+    resync();
+}
+
+void DebuggerWindow::dock(int tab)
+{
+    QWidget *win = m_popped[tab];
+    if (!win) return;
+    QWidget *page = m_pages[tab];
+    m_popped[tab] = nullptr;
+    int pos = 0;
+    for (int before = 0; before < tab; before++)   /* back where it was in the order */
+        if (!m_popped[before]) pos++;
+    page->setParent(nullptr);
+    m_tabs->insertTab(pos, page, tabLabel(tab));
+    m_tabs->setCurrentIndex(pos);
+    resync();
 }
 
 /* ---- events --------------------------------------------------------------- */
@@ -1393,22 +2058,26 @@ bool DebuggerWindow::event(QEvent *e)
     return QMainWindow::event(e);
 }
 
-void DebuggerWindow::keyPressEvent(QKeyEvent *e)
+/* The family's keys, from this window or one of its peeled-off tabs. */
+bool DebuggerWindow::handleKey(QKeyEvent *evt)
 {
-    if (!isDebuggerKey(e)) {
-        QMainWindow::keyPressEvent(e);
-        return;
-    }
-    const bool shift = e->modifiers() & Qt::ShiftModifier;
+    if (!isDebuggerKey(evt)) return false;
+    const bool shift = evt->modifiers() & Qt::ShiftModifier;
     /* held, the steps repeat; the others do not */
-    if (e->isAutoRepeat() && (e->key() == Qt::Key_F5 || e->key() == Qt::Key_F9 || e->key() == Qt::Key_F12)) return;
-    switch (e->key()) {
+    if (evt->isAutoRepeat() && (evt->key() == Qt::Key_F5 || evt->key() == Qt::Key_F9 || evt->key() == Qt::Key_F12)) return true;
+    switch (evt->key()) {
     case Qt::Key_F5: toggleRun(); break;
     case Qt::Key_F7: stepAnd(shift ? msxdebug_frame : msxdebug_step); break;
     case Qt::Key_F8: stepAnd(shift ? msxdebug_step_out : msxdebug_step_over); break;
     case Qt::Key_F9: toggleSelected(); break;
     default: hide(); break;     /* F12 */
     }
+    return true;
+}
+
+void DebuggerWindow::keyPressEvent(QKeyEvent *evt)
+{
+    if (!handleKey(evt)) QMainWindow::keyPressEvent(evt);
 }
 
 /* Shown: the engine attaches, which stops the machine, as on every sibling.
@@ -1420,7 +2089,34 @@ void DebuggerWindow::showEvent(QShowEvent *e)
     if (e->spontaneous()) return;
     msxdebug_attach(m_dbg);
     m_wasStopped = false;
-    QTimer::singleShot(0, this, [this] { if (isVisible()) settleAndSync(); });
+    m_seenSerial = ~0ull;
+    for (QWidget *win : m_popped)
+        if (win) win->show();
+    QTimer::singleShot(0, this, [this] {
+        if (!isVisible()) return;
+        firstShow();
+        settleAndSync();
+    });
+}
+
+/* The scripted-capture variables that touch the machine (read at construction),
+ * applied once the engine is attached: MSX_WATCH adds a watch, MSX_WATCH_BREAK a write-when-changed
+ * breakpoint on it, MSX_MEM_GOTO shows it in Memory, MSX_HISTORY records from
+ * the start. (MSX_DEBUGGER_TAB and MSX_POPOUT are read at construction.) */
+void DebuggerWindow::firstShow()
+{
+    if (m_shownOnce) return;
+    m_shownOnce = true;
+    uint16_t first, last;
+    if (!m_envWatch.isEmpty()) msxwatch_add(m_envWatch.constData());
+    if (!m_envWatchBreak.isEmpty() && msxsym_parse_range(m_dbg, m_envWatchBreak.constData(), &first, &last)) {
+        char err[200] = "";
+        msxdebug_breakpoint_add(m_dbg, MSXDEBUG_BP_WRITE, first, last, "value != old", err, sizeof err);
+    }
+    if (!m_envMemGoto.isEmpty() && msxsym_parse_range(m_dbg, m_envMemGoto.constData(), &first, &last)) {
+        showInMemory(first, last);
+    }
+    if (m_envHistory) msxdebug_history_enable(m_dbg, 1);   /* record from the start */
 }
 
 /* Hidden by F12, the close button or the main window: the engine goes away
@@ -1428,9 +2124,13 @@ void DebuggerWindow::showEvent(QShowEvent *e)
  * hides the window (it is not deleted, so it comes back as it was);
  * ignoring the close instead would make QApplication's quit, which closes
  * every window first, give up whenever it reached this one. A minimised
- * window's spontaneous hide is not a detach. */
+ * window's spontaneous hide is not a detach. The peeled-off tabs go with it. */
 void DebuggerWindow::hideEvent(QHideEvent *e)
 {
-    if (!e->spontaneous()) msxdebug_detach(m_dbg);
+    if (!e->spontaneous()) {
+        for (QWidget *win : m_popped)
+            if (win) win->hide();
+        msxdebug_detach(m_dbg);
+    }
     QMainWindow::hideEvent(e);
 }

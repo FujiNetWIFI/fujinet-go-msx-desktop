@@ -32,6 +32,7 @@ add_executable(fujinet-go-msx-kde
   FujiNetWindows.cpp
   help/HelpWindow.cpp
   debugger/DebuggerWindow.cpp
+  debugger/VideoTab.cpp
 )
 
 target_link_libraries(fujinet-go-msx-kde PRIVATE
@@ -57,6 +58,21 @@ if(WITH_WEBVIEW)
   else()
     message(STATUS "KDE frontend: QtWebEngine not found -- FujiNet config opens in the browser")
   endif()
+endif()
+
+# The Debugger window on the offscreen platform: the tabs and what needs no
+# machine always, and with a machine (openMSX and its C-BIOS) a NOP-padded
+# program stepped through the window.
+find_package(Qt6 COMPONENTS Test QUIET)
+if(Qt6Test_FOUND)
+  add_executable(debugger_kde_test debugger_test.cpp debugger/DebuggerWindow.cpp
+                 debugger/VideoTab.cpp help/HelpWindow.cpp)
+  target_link_libraries(debugger_kde_test PRIVATE msxsession Qt6::Widgets Qt6::Test)
+  target_include_directories(debugger_kde_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_compile_options(debugger_kde_test PRIVATE -Wall -Wextra)
+  add_test(NAME debugger_kde COMMAND debugger_kde_test)
+  set_tests_properties(debugger_kde PROPERTIES TIMEOUT 240
+                       ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
 install(TARGETS fujinet-go-msx-kde RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
