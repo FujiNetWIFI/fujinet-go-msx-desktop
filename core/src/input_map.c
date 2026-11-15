@@ -110,10 +110,23 @@ int msx_key_from_event(uint32_t keysym, uint32_t unicode, int ctrl_down,
     SDL_Keycode sdlk = 0;
     Uint16 mods = 0;
     size_t i;
-    (void)unicode;
 
     if (keysym == XK_F10 || keysym == XK_F11 || keysym == XK_F12)
         return 0;
+
+    /* The Windows and macOS frontends send a printable key as keysym 0 plus
+     * its base character in `unicode` (GNOME/KDE send the keysym itself).
+     * Without this, every letter and digit there became SDL keycode 0, which
+     * openMSX drops: only the specials (arrows, Return, ...) got through. */
+    if (keysym == 0) {
+        if (unicode < 0x20 || unicode >= 0x7F)
+            return 0;
+        /* SDL letter keycodes are lower case; macOS hands back 'B' with
+         * Shift held (Shift itself travels in the modifiers below). */
+        if (unicode >= 'A' && unicode <= 'Z')
+            unicode += 'a' - 'A';
+        keysym = unicode;
+    }
 
     if (keysym < 0x100) {
         /* Latin-1 range: X11 keysyms and SDL keycodes are both defined to
