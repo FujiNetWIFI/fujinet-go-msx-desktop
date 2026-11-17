@@ -51,6 +51,13 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.8.0" date="2026-11-16">
+      <description>
+        <p>
+          macOS: the picture is drawn with Metal in step with the display, so it is smoother on 60 and 120 Hz screens; the emulator runs with game-grade scheduling priority; and the app opts into macOS Game Mode when it is full screen.
+        </p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-11-15">
       <description>
         <p>The debugger gets the family's newer tools: twelve tabs with a Console prompt and expressions, Memory, Watches, Cart &amp; I/O, Trace and History, a Video tab (Display, Decoded, Beam and Values views, an inspector, Break on writes and per-line VDP register capture), a Sound tab for the PSG, SCC and FM chips, and Symbols. Registers are editable, breakpoints take conditions such as value &gt; old, and Access breakpoints are new.</p>
