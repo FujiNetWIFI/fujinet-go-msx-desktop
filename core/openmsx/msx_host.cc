@@ -6,6 +6,7 @@
  */
 
 #include "msx_host.hh"
+#include "apple_realtime.h"
 #include "msxvidcap.h"
 
 #include "compat.h"
@@ -269,6 +270,7 @@ void drain_all() {
 void openmsx_thread_main() {
     using namespace openmsx;
     msx_thread_setname("msx-openmsx");
+    apple_realtime_begin(1e9 / 60.0);   // a real-time slot on macOS; a no-op elsewhere
 
     // openMSX renders via GLES2/GL, and nothing here ever draws to a
     // visible window: every frontend paints its own widget from the frame

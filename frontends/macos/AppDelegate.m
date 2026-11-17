@@ -61,6 +61,7 @@ static NSInteger machineIndex(const char *machineId)
     msxsession *_session;
     NSWindow *_window;
     DisplayView *_display;
+    id<NSObject> _activity;          /* no App Nap, no timer coalescing while we run */
     NSWindow *_logWindow;
     NSTextView *_logView;
     NSTimer *_logTimer;
@@ -515,6 +516,13 @@ static NSInteger machineIndex(const char *machineId)
 - (void)applicationDidFinishLaunching:(NSNotification *)note
 {
     (void)note;
+
+    /* An emulator is latency-critical work: App Nap must not throttle the
+     * machine thread or coalesce its timers when the window is behind
+     * another, and Game Mode (Info.plist) asks the system to favour it. */
+    _activity = [[NSProcessInfo processInfo]
+        beginActivityWithOptions:(NSActivityUserInitiated | NSActivityLatencyCritical)
+                          reason:@"Emulating an MSX"];
     [self buildMenus];
 
     /* MSX's frame is always exactly 640x480 (see DisplayView.m); the
@@ -551,6 +559,10 @@ static NSInteger machineIndex(const char *machineId)
     (void)note;
     [_logTimer invalidate];
     [_display stop];
+    if (_activity) {
+        [[NSProcessInfo processInfo] endActivity:_activity];
+        _activity = nil;
+    }
     msxsession_stop(_session);
 }
 
