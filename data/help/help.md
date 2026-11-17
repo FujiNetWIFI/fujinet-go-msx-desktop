@@ -13,12 +13,12 @@ disks, cassettes and the network are there from the first start.
    MSX's keyboard. See [Controllers and keys](#controllers-and-keys).
 2. **Pick a machine.** The Machine menu has MSX, MSX2 and MSX2+. See
    [Machines](#machines).
-3. **Open FujiNet's CONFIG.** In C-BIOS, press <kbd>C</kbd> at the start screen
-   for the FujiNet client; it browses hosts and the SD folder. See
+3. **Use FujiNet's CONFIG.** It starts by itself when the machine boots, from
+   the FujiNet cartridge; it browses hosts and the SD folder. See
    [FujiNet](#fujinet).
 4. **Or bring your own files.** **Import Disk, Cassette or Cartridge…** copies a
-   `.dsk` or `.cas` image to FujiNet's SD folder and a `.rom` to the cartridge
-   folder. See [Disks, cassettes and cartridges](#disks-cassettes-and-cartridges).
+   `.dsk`, `.cas` or `.rom` image to FujiNet's SD folder, to mount from
+   CONFIG. See [Disks, cassettes and cartridges](#disks-cassettes-and-cartridges).
 5. **Connect to a different FujiNet.** The FujiNet settings can dial another
    instance. See [An external FujiNet](#an-external-fujinet).
 
@@ -142,19 +142,28 @@ real machines are copyrighted firmware and are never shipped.
 
 # Disks, cassettes and cartridges
 
-Files come in two ways: FujiNet serves disks and cassettes, and openMSX loads
-cartridges.
+FujiNet serves all three: disks, cassettes and cartridge ROMs.
 
 ## Import Disk, Cassette or Cartridge
 
-**Import Disk, Cassette or Cartridge…** copies a file where it is used:
+**Import Disk, Cassette or Cartridge…** copies a `.dsk` (a disk image), `.cas`
+(a cassette image) or `.rom` (a cartridge) to FujiNet's SD folder, to be
+mounted from FujiNet's web page or CONFIG. Other file types are refused.
 
-- A `.dsk` (a disk image) or `.cas` (a cassette image) goes to FujiNet's SD
-  folder, to be mounted from FujiNet's web page or CONFIG.
-- A `.rom` (a cartridge) goes to the app's cartridge folder; cartridges are
-  openMSX's business, not FujiNet's.
+## Booting a ROM
 
-Other file types are refused.
+Mount the `.rom` in a slot from CONFIG (or the web page). FujiNet sends the
+whole image to the FujiNet cartridge, which then boots it in place of CONFIG.
+
+A plain ROM of up to 32K needs nothing more. A megaROM needs its mapper named
+in the file name, before the extension:
+
+| Mapper | File name ends in |
+|---|---|
+| ASCII 8K | `[ASCII8].rom` |
+| ASCII 16K | `[ASCII16].rom` |
+| Konami (no SCC) | `[Konami].rom` |
+| Konami SCC | `[KonamiSCC].rom` |
 
 # FujiNet
 
@@ -166,9 +175,11 @@ starts FujiNet first and a fresh boot finds it waiting.
 
 ## CONFIG
 
-In C-BIOS, press <kbd>C</kbd> at the start screen to open FujiNet's CONFIG
-client. It browses hosts: the SD folder and servers on the network. Mount a disk
-or a cassette and boot it.
+FujiNet's CONFIG starts by itself when the machine boots: the FujiNet
+cartridge's ROM takes over before the BIOS start screen, so no key is needed.
+It browses hosts: the SD folder and servers on the network. Pick a file with
+the arrow keys, then **mount** it in a slot or **boot** it. A `.rom` boots in
+place of CONFIG; **Machine → Reset** comes back to CONFIG.
 
 ## The FujiNet menu
 
@@ -417,13 +428,13 @@ In the data folder:
 
 | Folder | Has |
 |---|---|
-| `carts` | imported cartridges |
 | `fujinet` | FujiNet's settings, its SD folder (`SD`) and its data |
 
 # Troubleshooting
 
-- **Unsupported media**: only `.dsk` and `.cas` go to FujiNet, and `.rom` is a
-  cartridge.
+- **Unsupported media**: only `.dsk`, `.cas` and `.rom` can be imported.
+- **A megaROM crashes or shows garbage**: name its mapper in the file name,
+  e.g. `game[ASCII8].rom`, then mount it again.
 - **CONFIG shows no host list, or the link loops**: a stray standalone
   `fujinet-pc-msx` is holding port 65505. Stop it, or point the app at it with
   **Use external FujiNet**.
